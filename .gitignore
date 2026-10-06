@@ -21,3 +21,8 @@ yarn-error.log*
 # OS-generated files
 .DS_Store
 Thumbs.db
+
+# Bot session metadata, local test output, and development backups
+.bot-state/
+.test-artifacts/
+.local-backups/
