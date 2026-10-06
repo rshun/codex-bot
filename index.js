@@ -5,13 +5,15 @@ const { runCodex } = require("./codex-runner");
 const { formatUsage } = require("./usage");
 const { queryQuota, formatQuota } = require("./quota");
 
-function loadConfig(env) {
-  if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes("这里换成") ||
-      env.TELEGRAM_BOT_TOKEN.startsWith("your_")) {
-    throw new Error("请配置 TELEGRAM_BOT_TOKEN。");
+function loadConfig(env, { platform = "telegram" } = {}) {
+  if (!["telegram", "discord"].includes(platform)) throw new Error("无效的平台配置。");
+  const tokenField = platform === "discord" ? "DISCORD_BOT_TOKEN" : "TELEGRAM_BOT_TOKEN";
+  const userField = platform === "discord" ? "DISCORD_ALLOWED_USER_ID" : "ALLOWED_USER_ID";
+  if (!env[tokenField] || env[tokenField].includes("这里换成") || env[tokenField].startsWith("your_")) {
+    throw new Error(`请配置 ${tokenField}。`);
   }
-  if (!/^[1-9]\d*$/.test(env.ALLOWED_USER_ID || "")) {
-    throw new Error("请配置有效的 ALLOWED_USER_ID；Bot 不允许匿名开放执行。");
+  if (!/^[1-9]\d*$/.test(env[userField] || "")) {
+    throw new Error(`请配置有效的 ${userField}；Bot 不允许匿名开放执行。`);
   }
   const defaultModel = env.CODEX_MODEL?.trim() || null;
   const models = [...new Set((env.CODEX_MODELS || "").split(",").map((value) => value.trim()).filter(Boolean))];
@@ -26,11 +28,12 @@ function loadConfig(env) {
     throw new Error("CODEX_TIMEOUT_MS 必须为 1000 到 3600000 的整数。");
   }
   return {
-    allowedUserId: env.ALLOWED_USER_ID,
+    platform, allowedUserId: env[userField],
     bin: env.CODEX_BIN || "/home/codex/.local/bin/codex",
-    workdir: path.resolve(env.WORKDIR || "/home/codex"),
+    workdir: path.resolve(env.WORKDIR || (platform === "discord" ? "/home/codex/discord-workdir" : "/home/codex")),
     codexHome: path.resolve(env.CODEX_HOME || path.join(os.homedir(), ".codex")),
-    sessionFile: path.resolve(env.SESSION_FILE || path.join(__dirname, ".bot-state", "sessions.json")),
+    sessionFile: path.resolve(env.SESSION_FILE || path.join(__dirname, ".bot-state",
+      platform === "discord" ? "discord-sessions.json" : "sessions.json")),
     defaultModel, models, timeoutMs, env,
   };
 }
@@ -67,7 +70,7 @@ function createRedactor(env) {
 }
 
 function createMessageHandler({ bot, store, config, botUsername = "", runner = runCodex,
-                                quotaReader = queryQuota, logger = console }) {
+                                quotaReader = queryQuota, transport, logger = console }) {
   const busy = new Set();
   const stateFailures = new Set();
   let quotaRequest;
@@ -83,10 +86,15 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/status — 查看会话和运行状态",
     "/usage — 查看当前会话最近的 token 报告",
     "/quota — 查询账号额度和重置时间",
-    "/id — 查看自己的 Telegram 用户 ID",
+    `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
   ].join("\n");
 
   async function reply(msg, text) {
+    if (transport) {
+      try { await transport.reply(msg, redact(text)); }
+      catch { logger.error("Discord reply failed."); }
+      return;
+    }
     const options = { reply_parameters: { message_id: msg.message_id } };
     if (msg.message_thread_id) options.message_thread_id = msg.message_thread_id;
     for (const part of splitMessage(redact(text))) {
@@ -101,10 +109,10 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     if (command?.[2] && command[2].toLowerCase() !== botUsername.toLowerCase()) return;
     const name = command?.[1].toLowerCase();
     const argument = command?.[3]?.trim() || "";
-    if (name === "id") return reply(msg, `你的 Telegram 用户 ID：${msg.from.id}`);
+    if (name === "id") return reply(msg, `你的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID：${msg.from.id}`);
     if (String(msg.from.id) !== config.allowedUserId) return reply(msg, "未授权。");
 
-    const key = `${msg.chat.id}:${msg.message_thread_id || 0}:${msg.from.id}`;
+    const key = `${config.platform === "discord" ? "discord:" : ""}${msg.chat.id}:${msg.message_thread_id || 0}:${msg.from.id}`;
     const session = store.get(key);
     const selectedModel = session.model || config.defaultModel;
     const modelLabel = selectedModel || "Codex CLI 默认配置（未显式指定模型）";
@@ -169,7 +177,8 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
       // Check persistence before launching a task, so unwritable state never causes stateless runs.
       store.set(key, session);
       try {
-        await bot._request("setMessageReaction", {
+        if (transport) await transport.markReceived(msg);
+        else await bot._request("setMessageReaction", {
           form: { chat_id: msg.chat.id, message_id: msg.message_id,
             reaction: JSON.stringify([{ type: "emoji", emoji: "👀" }]), is_big: false },
         });

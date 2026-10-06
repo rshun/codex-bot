@@ -4,7 +4,7 @@ const { validateReport, copyReport } = require("./usage");
 
 const THREAD_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
-const SESSION_KEY = /^-?\d+:\d+:\d+$/;
+const SESSION_KEY = /^(?:discord:)?-?\d+:\d+:\d+$/;
 
 function validateSession(session) {
   return session && typeof session === "object" &&
@@ -30,9 +30,10 @@ function replaceStateFile(source, destination, rename = fs.renameSync, platform 
 }
 
 class SessionStore {
-  constructor(filename, { workdir, codexHome }) {
+  constructor(filename, { workdir, codexHome, platform = "telegram" }) {
+    if (!["telegram", "discord"].includes(platform)) throw new Error("无效的状态平台。");
     this.filename = path.resolve(filename);
-    this.context = { workdir: path.resolve(workdir), codexHome: path.resolve(codexHome) };
+    this.context = { workdir: path.resolve(workdir), codexHome: path.resolve(codexHome), platform };
     this.sessions = {};
     if (!fs.existsSync(this.filename)) return;
 
@@ -43,13 +44,13 @@ class SessionStore {
     } catch {
       throw new Error("会话状态无法读取，请备份后检查 SESSION_FILE。");
     }
-    if (data?.version !== 1 || data.workdir !== this.context.workdir ||
+    if (data?.version !== 1 || (data.platform === undefined ? "telegram" : data.platform) !== platform || data.workdir !== this.context.workdir ||
         data.codexHome !== this.context.codexHome || !data.sessions ||
         typeof data.sessions !== "object" || Array.isArray(data.sessions)) {
       throw new Error("会话状态格式或运行目录不匹配，请检查 SESSION_FILE、WORKDIR 和 CODEX_HOME。");
     }
     for (const [key, session] of Object.entries(data.sessions)) {
-      if (!SESSION_KEY.test(key) || !validateSession(session)) {
+      if (!this.validKey(key) || !validateSession(session)) {
         throw new Error("会话状态包含无效记录，请备份后检查 SESSION_FILE。");
       }
       this.sessions[key] = copySession(session);
@@ -60,8 +61,12 @@ class SessionStore {
     return copySession(this.sessions[key] || { threadId: null, model: null });
   }
 
+  validKey(key) {
+    return SESSION_KEY.test(key) && key.startsWith("discord:") === (this.context.platform === "discord");
+  }
+
   set(key, session) {
-    if (!SESSION_KEY.test(key) || !validateSession(session)) {
+    if (!this.validKey(key) || !validateSession(session)) {
       throw new Error("无效的会话状态。");
     }
     const sessions = { ...this.sessions, [key]: copySession(session) };

@@ -20,6 +20,8 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
     let child;
     const childEnv = { ...env };
     delete childEnv.TELEGRAM_BOT_TOKEN;
+    delete childEnv.DISCORD_BOT_TOKEN;
+    delete childEnv.DISCORD_ALLOWED_USER_ID;
     delete childEnv.ALLOWED_USER_ID;
     try {
       child = spawnProcess(bin, buildArgs({ threadId, model }), {

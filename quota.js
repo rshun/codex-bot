@@ -35,6 +35,8 @@ function queryQuota({ bin, workdir, env, timeoutMs = 15000 }, spawnProcess = spa
     let child;
     const childEnv = { ...env };
     delete childEnv.TELEGRAM_BOT_TOKEN;
+    delete childEnv.DISCORD_BOT_TOKEN;
+    delete childEnv.DISCORD_ALLOWED_USER_ID;
     delete childEnv.ALLOWED_USER_ID;
     try {
       // Default stdio transport also works with CLI versions predating --listen.
