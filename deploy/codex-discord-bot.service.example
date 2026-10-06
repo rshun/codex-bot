@@ -1,0 +1,24 @@
+# Review account, Node path and directories on the target host before installation.
+[Unit]
+Description=Codex Discord Bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/home/codex/codex-tg-bot
+Environment=NODE_ENV=production
+Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord
+ExecStart=/usr/bin/node /home/codex/codex-tg-bot/discord.js
+Restart=on-failure
+RestartSec=15
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

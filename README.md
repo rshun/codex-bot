@@ -1,6 +1,15 @@
-# Codex Telegram Bot
+# Codex Bot
 
 在 Debian 上运行的 Node.js Telegram Bot，通过本机 `codex exec` 执行任务。普通文本和 `/codex` 使用同一个会话，后续消息通过明确的会话 ID 恢复上下文。模型选择和会话关联会持久化，Bot 重启后可继续对话。
+
+同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
+
+远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
+
+```bash
+git remote set-url origin git@github.com:rshun/codex-bot.git
+git remote -v
+```
 
 ## 运行前检查
 
@@ -17,6 +26,8 @@ node --version
 ```
 
 当前依赖要求 Node.js 18 或以上；测试使用 Node.js 内置 `node:test`。CLI 的 `exec` 和 `exec resume` 都必须支持 `--json`、`--model`、`--skip-git-repo-check` 和通过 `-` 读取标准输入。版本不兼容时先停止部署，不要直接升级或安装依赖。
+
+Discord 及全量测试要求 Node.js 22.4 或以上，且内置 WebSocket 未关闭；Telegram 运行入口仍支持项目原有 Node 要求。不新增依赖，锁文件不变。先检查 `npm ls node-telegram-bot-api dotenv --depth=0`；显示 `(empty)` 或 `MODULE_NOT_FOUND` 时，必须先恢复项目已有依赖。“无需重装”只适用于依赖已完整安装的机器。
 
 `/quota` 还需要 CLI 提供 `app-server` 的 `initialize`、`account/read` 和 `account/rateLimits/read` 接口。仅有 `app-server --help` 不足以证明账号额度接口可用，部署后需用 `/quota` 验收；不支持时会提示版本或登录方式问题。
 
@@ -114,6 +125,8 @@ node --check codex-runner.js
 node --check session-store.js
 node --check usage.js
 node --check quota.js
+node --check discord.js
+node --check discord-client.js
 git diff --check
 ```
 
@@ -129,6 +142,91 @@ Debian 实际验收需要使用已运行的 Bot：
 6. 对账号不支持但格式合法的模型，确认得到脱敏失败提示，改回可用模型后仍能恢复原会话。
 7. 完成一个普通任务后发送 `/usage`，确认获得 token 报告，缺失的字段显示“未知”；重启后再查询，确认报告仍保留。
 8. 在 ChatGPT 登录方式下发送 `/quota`，确认显示额度窗口及北京时间重置时间。API Key/provider 登录时应收到不支持提示，而不是剩余 0%。
+
+## Discord 配置与部署
+
+Discord 增量在 `codex/discord` 分支开发，审查并合入远端 `master` 后才能部署生产。第一版支持一个授权用户、私聊、白名单频道/线程、文字消息和原生斜杠命令，使用单个 Gateway 连接。没有附件、语音、多人共享对话或分片功能。只需出站 HTTPS 和 WebSocket，无需新增入站端口或反向代理。
+
+Discord 默认工作目录是 `/home/codex/discord-workdir`，状态文件是 `.bot-state/discord-sessions.json`，与 Telegram 分开。可以共用服务账号及 `CODEX_HOME`，Codex 额度和账号并发限制也共用。若主动共用 `WORKDIR`，两个服务可能同时修改同一工作树；本版没有跨进程任务锁，不应同时向同一工作树发修改任务。分开工作目录不会改变 Codex 账号既有的文件访问权限。
+
+状态新增 `platform` 标识，旧状态默认归属 Telegram。Discord 键为 `discord:频道ID:0:用户ID`，线程有自己的频道 ID 和上下文。平台不匹配会拒绝读取。自定义状态路径也必须独立，不能给两个进程共享同一个文件。没有跨平台账号绑定或上下文共享。
+
+**Discord 控制台准备：** 创建专用应用和 Bot，本地保存 Token；启用 Bot 的 Message Content Intent，本版即使只用斜杠命令也请求此 intent。通过 `bot` 和 `applications.commands` scopes 邀请到服务器，按需授予 View Channel、Send Messages、Read Message History、Send Messages in Threads 权限，不需要 Administrator。私有线程需要 Bot 已加入。启用客户端 Developer Mode 后复制用户、频道和线程 ID。
+
+`DISCORD_ALLOWED_USER_ID` 必填。`DISCORD_CHANNEL_IDS` 是逗号分隔的精确频道或线程白名单，留空禁用所有服务器频道；父频道不自动授权新线程。私聊默认开启且只接受授权用户，可用 `DISCORD_ALLOW_DMS=false` 关闭。其他用户的文字消息静默忽略，斜杠命令返回未授权提示。
+
+在 myServer 上，以实际服务账号进入项目目录。以下示例按已有 `/home/codex/codex-tg-bot` 路径编写，执行前核对服务账号、目录和 Node 二进制：
+
+```bash
+cd /home/codex/codex-tg-bot
+git branch --show-current
+git status --short
+systemctl show codex-tg-bot.service --property=User,WorkingDirectory
+node --version
+npm ls node-telegram-bot-api dotenv --depth=0
+```
+
+先按本文“部署与回滚”备份，再拉取已审查的 `master`。若缺少依赖，先备份现有 `node_modules` 和依赖文件，确认接受恢复后手动执行 `npm ci --omit=dev`；该命令会重建 `node_modules`，按锁文件恢复已有依赖，不升级依赖或修改锁文件。安装失败则停止部署。
+
+首次配置确认 `.env.discord` 尚不存在；已存在时先备份，在原文件上修改。下面的复制不覆盖已有文件：
+
+```bash
+umask 077
+cp -an .env.discord.example .env.discord
+mkdir -p /home/codex/discord-workdir
+```
+
+在本地编辑 `.env.discord`，填写 Token、用户 ID、频道白名单。真实配置、状态和注册备份已被忽略，不能上传聊天或 Git。`CODEX_*` 字段同 Telegram，Discord 超时上限为 600000 毫秒。默认只读入口旁的 `.env.discord`，不自动读 `.env`；`DISCORD_ENV_FILE` 可指定其他私有配置。
+
+```bash
+node --check discord.js
+node --check discord-client.js
+npm test
+node discord.js --check-config
+```
+
+`--check-config` 只读检查配置、已有状态、工作目录、状态目录及绝对 CLI 路径的本地权限，不创建状态，不连接 Discord；不能证明网络和 Codex 登录可用。仍须以实际账号和 `CODEX_HOME` 完成本文章前面的 Codex 检查。systemd 的 Node 版本以 `ExecStart` 中的二进制为准。
+
+**使用：** 普通文字继续当前对话；也支持 `!codex 任务`、`!model 模型ID`、`!model default`、`!new`、`!models`、`!status`、`!usage`、`!quota`、`!id`、`!help`。这些文字命令无需注册。原生斜杠命令使用 `/codex task:...` 和 `/model name:...`，其余命令同名。
+
+服务启动不自动注册斜杠命令。需要注册时填写 `DISCORD_APPLICATION_ID`；可先填 `DISCORD_COMMAND_GUILD_ID` 在一个服务器验收，留空则注册全局命令。服务器命令不出现在私聊，私聊仍可用文字命令；全局命令在私聊的可见性也取决于应用安装及共同服务器。改变注册作用域不会自动删除原作用域的命令。
+
+```bash
+# 无需凭据、无网络请求，仅输出准备注册的定义。
+node discord.js --register-commands
+# 核对应用、作用域及命令后，手动确认执行：
+node discord.js --register-commands --apply
+```
+
+`--apply` 更新所选作用域内九个同名命令，其他命令保留。更新前读取现有定义，写入 `.local-backups/discord-commands-*.json` 私有备份，备份失败不更新。中途失败可能只更新了一部分，检查原因后可以重新执行。不自动删除任何命令。
+
+斜杠命令先发送延迟确认，确认失败不执行任务；回复只对发起人可见。普通文字回复对所在频道可见。长回复自动分段，关闭用户、角色和 everyone 提及。交互有有效期，即使任务成功，极慢网络下回复仍可能失败，不得因此自动重跑任务。
+
+前台验收可运行 `npm run start:discord`，前提是 Discord 服务尚未运行；看到 `Discord gateway ready.` 只证明 Gateway 已连接。验收完退出前台进程，再交给 systemd，不能运行两个 Discord 实例。
+
+**独立服务：** 示例为 `deploy/codex-discord-bot.service.example`。先核对其中的账号、组、Node、项目和配置路径。首次安装先确认没有旧 unit；若已存在，先备份实际 unit 并审查差异，不能直接覆盖：
+
+```bash
+systemctl show codex-discord-bot.service --property=LoadState,FragmentPath,User,WorkingDirectory
+```
+
+首次部署 `LoadState=not-found` 是正常情况。核对示例且确认目标不存在后，由操作者执行：
+
+```bash
+sudo install -m 0644 deploy/codex-discord-bot.service.example /etc/systemd/system/codex-discord-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-discord-bot.service
+systemctl is-active codex-discord-bot.service
+journalctl -u codex-discord-bot.service -n 30 --no-pager
+```
+
+已有 Discord 服务更新时，确认空闲，备份源码、配置、独立状态及 unit，再更新审查后的文件。需要更新 unit 时执行 `daemon-reload`，确认会短暂离线并中断运行任务后，手动执行 `sudo systemctl restart codex-discord-bot.service`。示例用 `KillMode=control-group`，停止时会终止服务的 Codex 子进程。Telegram 服务配置不变；共享核心升级后的 Telegram 回归验收仍按其部署步骤进行。
+
+验收私聊、白名单频道及线程的连续对话、模型切换、`new`、用量、额度和帮助；确认其他用户、Bot/webhook、未授权频道不执行任务，长任务期间拒绝新任务但允许状态查询，受控重启后上下文恢复。线程须单独列入白名单。本地测试使用模拟 REST/Gateway/Codex；真实账号、网络、意图和平台权限必须在 Debian 实际验收。
+
+固定错误：`dependency_missing` 检查已有 Node 依赖；HTTP 401 检查凭据，403 检查权限；`close_4014` 检查 Message Content Intent；`node_websocket_required` 检查 Node 和启动参数。断线和无心跳 ACK 会恢复连接；连续十次恢复失败、认证/意图不允许或会话启动额度不足时停止，交由 systemd 的有限重启策略处理。不记录原始错误、Token 或 Gateway session 信息。
+
+回滚新增服务会中断 Discord 任务并离线。确认空闲、备份当前源码/配置/状态后，由操作者执行 `sudo systemctl disable --now codex-discord-bot.service`，只影响 Discord。unit、配置及状态可以保留，不需要删除。回滚已有 Discord 部署时成套恢复源码和 unit，检查后 `daemon-reload` 并受控重启；不能换入 Telegram 状态。斜杠命令独立于源码，停服务不删除命令，旧定义需按私有备份逐项审查恢复。
 
 ## 部署与回滚
 
@@ -162,7 +260,7 @@ CODEX_HOME_DIR=/path/to/actual/codex-home
 BACKUP_DIR="$BOT_DIR/.local-backups/$(date +%Y%m%d-%H%M%S)"
 umask 077
 mkdir -p "$BACKUP_DIR/source"
-for file in index.js package.json package-lock.json .gitignore codex-runner.js session-store.js usage.js quota.js; do
+for file in index.js package.json package-lock.json .gitignore codex-runner.js session-store.js usage.js quota.js discord.js discord-client.js; do
   if [ -f "$file" ]; then
     cp -a -- "$file" "$BACKUP_DIR/source/"
   fi
@@ -230,3 +328,7 @@ journalctl -u "$BOT_UNIT" -n 50 --no-pager
 - [Codex 非交互模式、JSONL 事件与会话恢复](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [Codex CLI 命令与模型参数](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 - [Codex App Server 账号及额度接口](https://learn.chatgpt.com/docs/app-server)
+- [Discord Gateway 与意图](https://docs.discord.com/developers/events/gateway)
+- [Discord 命令注册](https://docs.discord.com/developers/interactions/application-commands)
+- [Discord 交互确认和有效期](https://docs.discord.com/developers/interactions/receiving-and-responding)
+- [Node 内置 WebSocket](https://nodejs.org/api/globals.html#class-websocket)
