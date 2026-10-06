@@ -2,6 +2,8 @@ const path = require("node:path");
 const os = require("node:os");
 const { SessionStore, MODEL_NAME } = require("./session-store");
 const { runCodex } = require("./codex-runner");
+const { formatUsage } = require("./usage");
+const { queryQuota, formatQuota } = require("./quota");
 
 function loadConfig(env) {
   if (!env.TELEGRAM_BOT_TOKEN || env.TELEGRAM_BOT_TOKEN.includes("这里换成") ||
@@ -64,9 +66,11 @@ function createRedactor(env) {
   };
 }
 
-function createMessageHandler({ bot, store, config, botUsername = "", runner = runCodex, logger = console }) {
+function createMessageHandler({ bot, store, config, botUsername = "", runner = runCodex,
+                                quotaReader = queryQuota, logger = console }) {
   const busy = new Set();
   const stateFailures = new Set();
+  let quotaRequest;
   const redact = createRedactor(config.env);
   const help = [
     "Codex Bot 已启动，直接发送文本即可连续对话。",
@@ -77,6 +81,8 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/model default — 恢复默认模型配置",
     "/models — 查看配置的模型名单",
     "/status — 查看会话和运行状态",
+    "/usage — 查看当前会话最近的 token 报告",
+    "/quota — 查询账号额度和重置时间",
     "/id — 查看自己的 Telegram 用户 ID",
   ].join("\n");
 
@@ -103,6 +109,19 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     const selectedModel = session.model || config.defaultModel;
     const modelLabel = selectedModel || "Codex CLI 默认配置（未显式指定模型）";
     if (name === "start" || name === "help") return reply(msg, help);
+    if (name === "usage") {
+      return reply(msg, formatUsage(session.lastUsage, busy.has(key)) +
+        (stateFailures.has(key) ? "\n状态保存曾失败，以上仅为最后保存的数据。" : ""));
+    }
+    if (name === "quota") {
+      // Coalesce concurrent requests; every response is from this query, never a stale cache.
+      if (!quotaRequest) {
+        quotaRequest = Promise.resolve().then(() => quotaReader({
+          bin: config.bin, workdir: config.workdir, env: { ...config.env, CODEX_HOME: config.codexHome },
+        })).catch(() => ({ ok: false, kind: "query" })).finally(() => { quotaRequest = undefined; });
+      }
+      return reply(msg, formatQuota(await quotaRequest));
+    }
     if (name === "status") {
       return reply(msg, [
         `模型选择：${modelLabel}`,
@@ -133,7 +152,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
       return reply(msg, `后续消息将使用：${model || config.defaultModel || "Codex CLI 默认配置"}。上下文保留；模型可用性将在下次调用时验证。`);
     }
     if (name === "new") {
-      try { store.set(key, { ...session, threadId: null }); }
+      try { store.set(key, { ...session, threadId: null, lastUsage: null }); }
       catch { return reply(msg, "新会话状态保存失败，请检查状态目录权限。"); }
       stateFailures.delete(key);
       return reply(msg, "已开始新对话，模型选择保留。下一条消息将创建新会话。");
@@ -160,7 +179,17 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
         prompt, threadId: session.threadId, model: selectedModel, timeoutMs: config.timeoutMs,
         onThread: (threadId) => store.set(key, { ...session, threadId }),
       });
-      if (result.ok) return await reply(msg, result.text);
+      let usageWarning = "";
+      try {
+        store.set(key, { ...store.get(key), lastUsage: {
+          at: new Date().toISOString(), status: result.ok ? "completed" : "failed", tokens: result.usage || null,
+        } });
+      } catch {
+        stateFailures.add(key);
+        logger.error("Usage persistence failed.");
+        usageWarning = "\n\n用量保存失败，请检查状态目录权限。任务可能已经执行，请先核实结果。";
+      }
+      if (result.ok) return await reply(msg, result.text + usageWarning);
       if (result.kind === "state") stateFailures.add(key);
       const errors = {
         launch: "Codex 启动失败，请检查 CODEX_BIN、WORKDIR 和执行权限。",
@@ -172,7 +201,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
         output_limit: "Codex 输出超过安全上限，本轮已停止，请缩小任务范围。",
       };
       logger.error(`Codex run failed: ${Object.hasOwn(errors, result.kind) ? result.kind : "unknown"}.`);
-      return await reply(msg, errors[result.kind] || "Codex 执行失败。");
+      return await reply(msg, (errors[result.kind] || "Codex 执行失败。") + usageWarning);
     } catch {
       logger.error("Bot task or session persistence failed.");
       return await reply(msg, "任务处理或会话状态保存失败，请检查状态目录权限和运行配置。");

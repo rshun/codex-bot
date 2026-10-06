@@ -1,5 +1,6 @@
 const { spawn } = require("node:child_process");
 const { THREAD_ID, MODEL_NAME } = require("./session-store");
+const { normalizeUsage } = require("./usage");
 
 function buildArgs({ threadId, model }) {
   if (threadId && !THREAD_ID.test(threadId)) throw new Error("Invalid thread ID");
@@ -31,6 +32,7 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
 
     let buffer = "";
     let answer = "";
+    let usage = null;
     let currentThread = threadId || null;
     let completed = false;
     let failure;
@@ -68,6 +70,8 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
         answer = event.item.text;
       } else if (event.type === "turn.completed") {
         completed = true;
+        // This is a snapshot of the CLI report, never a value to re-add on resume.
+        usage = normalizeUsage(event.usage);
       } else if (event.type === "turn.failed" || event.type === "error") {
         // Error payloads may contain prompts, credentials, and command output.
         stop("execution");
@@ -101,11 +105,11 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
       clearTimeout(timer);
       clearTimeout(killTimer);
       if (failure || code !== 0) {
-        resolve({ ok: false, kind: failure || "execution" });
+        resolve({ ok: false, kind: failure || "execution", usage });
       } else if (!completed || !currentThread) {
-        resolve({ ok: false, kind: "protocol" });
+        resolve({ ok: false, kind: "protocol", usage });
       } else {
-        resolve({ ok: true, threadId: currentThread, text: answer.trim() || "（本轮未返回文本。）" });
+        resolve({ ok: true, threadId: currentThread, text: answer.trim() || "（本轮未返回文本。）", usage });
       }
     });
     child.stdin.end(prompt);
