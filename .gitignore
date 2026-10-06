@@ -26,3 +26,6 @@ Thumbs.db
 .bot-state/
 .test-artifacts/
 .local-backups/
+
+# Generated release packages and retained staging directories
+dist/
