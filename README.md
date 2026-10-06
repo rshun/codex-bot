@@ -260,6 +260,82 @@ journalctl -u codex-discord-bot.service --since "5 minutes ago" --no-pager
 
 ## 部署与回滚
 
+### GitHub 发布包部署（服务器无需 Git 或 npm）
+
+从 [GitHub Releases](https://github.com/rshun/codex-bot/releases) 下载对应版本的 `codex-bot-v版本-node.tar.gz` 和 `SHA256SUMS`。不要使用 GitHub 自动生成的 Source code 压缩包，它不包含运行依赖。发布包同时提供 Telegram、Discord、锁定的现有依赖、许可证、示例配置、服务示例和逐文件哈希清单 `release-manifest.json`。运行文件仍为 JavaScript；服务器需要 Node.js 22.4 或以上和已经安装、登录的 Codex CLI，部署时无需拉取仓库、构建或执行 npm 安装。
+
+包不包含真实 `.env`、`.env.discord`、会话状态、Codex 认证/历史、测试、Git 元数据或本地备份。首次安装在稳定配置目录中创建配置；已有安装继续使用原配置和状态。以下按已有 `/home/codex/codex-tg-bot` 目录及 `codex` 账号编写，实际服务账号、Node 路径、自定义配置/状态和 unit 位置必须先核对。
+
+**下载与校验：** 使用现有 `curl`、`tar` 和 `sha256sum`，没有这些工具时先停下核对环境，不自动安装。以下每一步成功后才继续；下载到新建目录，不覆盖已有包：
+
+```bash
+node --version
+command -v curl tar sha256sum
+BOT_DIR=/home/codex/codex-tg-bot
+VERSION=1.0.0
+PACKAGE_DIR="$BOT_DIR/.local-backups/package-v$VERSION-$(date +%Y%m%d-%H%M%S)"
+umask 077
+mkdir -p "$PACKAGE_DIR"
+cd "$PACKAGE_DIR"
+curl -fL -o "codex-bot-v$VERSION-node.tar.gz" "https://github.com/rshun/codex-bot/releases/download/v$VERSION/codex-bot-v$VERSION-node.tar.gz"
+curl -fL -o SHA256SUMS "https://github.com/rshun/codex-bot/releases/download/v$VERSION/SHA256SUMS"
+sha256sum --check SHA256SUMS
+tar -tzf "codex-bot-v$VERSION-node.tar.gz"
+```
+
+**安装独立版本目录：** 确认校验通过、压缩包根目录是 `codex-bot-v$VERSION`。以服务账号执行，确认目标版本目录尚不存在；已存在时先检查原内容，不在原目录再次解压：
+
+```bash
+RELEASE_DIR="$BOT_DIR/releases/codex-bot-v$VERSION"
+test ! -e "$RELEASE_DIR"
+mkdir -p "$BOT_DIR/releases"
+tar -xzf "$PACKAGE_DIR/codex-bot-v$VERSION-node.tar.gz" -C "$BOT_DIR/releases"
+node --check "$RELEASE_DIR/index.js"
+node --check "$RELEASE_DIR/discord.js"
+node --check "$RELEASE_DIR/discord-client.js"
+```
+
+包没有测试目录，不要把在包内执行 `npm test` 当作完整验收。发布前在源码仓库运行全量测试和解压冒烟检查；服务器继续按本文 Telegram/Discord 实际验收流程验证网络、权限、CLI 登录、模型及上下文。
+
+**保留配置与上下文：** `WorkingDirectory` 继续为稳定目录 `$BOT_DIR`，Telegram 从这里加载原 `.env`；Discord 的 `DISCORD_ENV_FILE` 指向原 `.env.discord`。两个服务都必须明确指定原来的 `SESSION_FILE`，不要使用新版本目录下的默认值，否则旧关联不会被读取。下面默认路径仅供核对，自定义路径时必须替换成现有实际值。保持原 `WORKDIR`、`CODEX_HOME` 和服务账号不变：
+
+```bash
+cd "$BOT_DIR"
+DISCORD_ENV_FILE="$BOT_DIR/.env.discord" SESSION_FILE="$BOT_DIR/.bot-state/discord-sessions.json" node "$RELEASE_DIR/discord.js" --check-config
+systemctl show codex-tg-bot.service --property=User,WorkingDirectory,FragmentPath
+systemctl show codex-discord-bot.service --property=User,WorkingDirectory,FragmentPath
+```
+
+首次配置从包内 `.env.example`、`.env.discord.example` 复制到 `$BOT_DIR`，仅在目标不存在时复制；真实值在本地填写。`WORKDIR` 仍须事先存在。已有配置不要覆盖。包内的 `deploy/codex-tg-bot.service.example` 和 `deploy/codex-discord-bot.service.example` 已填写本版本入口，但账号、配置、状态路径和现有沙箱限制仍须逐项审查。
+
+**切换现有服务：** 先确认 Bot 空闲，按本文备份要求将真实配置、实际状态、`CODEX_HOME` 和现有 unit 保存到受保护目录；确认备份可用。首次迁移时原源码目录和依赖可以保留。不要用示例整体覆盖已有 unit，只在备份后的实际 unit 中调整以下字段，保留原账号、代理环境及沙箱设置：
+
+| 服务 | 需要核对的字段（示例路径） |
+| --- | --- |
+| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.0.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
+| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.0.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
+
+systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
+
+修改 unit 后确认会短暂中断所选平台连接并终止运行任务，再手动执行。以下只重启 Discord；迁移 Telegram 时使用它的实际服务名，分别验收：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart codex-discord-bot.service
+systemctl is-active codex-discord-bot.service
+journalctl -u codex-discord-bot.service -n 30 --no-pager
+```
+
+后续升级下载新版本、校验、解压到新目录，备份 unit 后仅切换入口路径，保持配置/状态路径稳定。**回滚**会中断所选服务的任务：先备份当前 unit，确认原备份及旧版本目录完整，再由操作者恢复原 unit 或改回旧版本 `ExecStart`，检查后 `daemon-reload` 并受控重启，按原平台验收。不要恢复旧状态覆盖升级期间产生的会话。新旧版本目录及备份均可保留，不自动删除。
+
+### 维护者打包与发布
+
+在已同步的开发分支修改并运行 `npm test`；全量测试还需要现有 Git 和系统 `tar`。审查合并到 `master` 后，以干净工作区运行 `npm run build:release`。构建仅读取项目既有、锁定的已安装依赖，不联网、不自动安装、不修改依赖和锁文件。依赖缺失或版本不符时拒绝构建，恢复安装必须先由操作者确认。只支持当前纯 JavaScript 依赖组合，未来新增依赖需要重新审查打包逻辑。
+
+构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
+
+### Git 仓库部署方式
+
 本地开发必须在开发分支进行，修改前拉取对应远端。查询功能发布在 `codex/tg-context-model` 分支。**推送开发分支不会自动更新远端 `master` 或 Debian。** 先在 GitHub 审查该分支到 `master` 的 Pull Request 并合并，再按以下步骤更新生产机器；不要在 Debian 的 `master` 工作区直接开发。本项目不会自动部署、安装依赖或重启服务。
 
 以下命令仅供操作者核实后手动执行。升级期间保持 Bot 空闲并停止发送任务；重启会短暂中断 Telegram 回复，正在执行的任务可能被中断。本次查询功能没有修改依赖、锁文件或配置字段，无需重新安装依赖。若从首版升级，还必须补充 `ALLOWED_USER_ID` 并检查状态目录权限。

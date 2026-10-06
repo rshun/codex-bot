@@ -1,0 +1,26 @@
+# Preserve actual account, Node path, existing config and state paths before use.
+[Unit]
+Description=Codex Telegram Bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+# Telegram dotenv reads .env from this stable directory.
+WorkingDirectory=/home/codex/codex-tg-bot
+Environment=NODE_ENV=production
+# Replace with the actual existing SESSION_FILE if customized.
+Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json
+ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/@RELEASE_NAME@/index.js
+Restart=on-failure
+RestartSec=15
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

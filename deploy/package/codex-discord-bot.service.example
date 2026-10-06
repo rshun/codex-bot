@@ -1,0 +1,26 @@
+# Preserve actual account, Node path, existing config and state paths before use.
+[Unit]
+Description=Codex Discord Bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/home/codex/codex-tg-bot
+Environment=NODE_ENV=production
+Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord
+# Replace with the actual existing SESSION_FILE if customized.
+Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json
+ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/@RELEASE_NAME@/discord.js
+Restart=on-failure
+RestartSec=15
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
