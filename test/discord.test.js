@@ -252,6 +252,28 @@ function gatewayFixture() {
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
+test("regional READY gateways connect and resume without exposing session credentials", async () => {
+  for (const host of ["gateway-us-east1-b.discord.gg", "gateway-us-east1-c.discord.gg", "gateway-us-east1-d.discord.gg"]) {
+    const app = gatewayFixture();
+    await app.gateway.start();
+    const socket = FakeSocket.instances.at(-1);
+    socket.packet(10, { heartbeat_interval: 1000 });
+    socket.packet(0, { ...ready, session_id: "synthetic_session", resume_gateway_url: `wss://${host}` }, { s: 1, t: "READY" });
+    await tick();
+    assert.deepEqual(app.fatal, []);
+    assert.equal(app.events[0].type, "READY");
+    socket.packet(7, null);
+    app.timers.run((timer) => !timer.interval && timer.ms === 1000);
+    const resumed = FakeSocket.instances.at(-1);
+    assert.equal(resumed.url, `wss://${host}/?v=10&encoding=json`);
+    resumed.packet(10, { heartbeat_interval: 1000 });
+    assert.deepEqual(resumed.sent[0], { op: 6, d: { token: "synthetic_discord_credential", session_id: "synthetic_session", seq: 1 } });
+    assert.ok(app.logs.every((line) => !line.includes("synthetic_session") && !line.includes("synthetic_discord_credential")));
+    app.gateway.stop();
+    assert.equal(app.timers.pending.size, 0);
+  }
+});
+
 test("Discord Gateway identifies, heartbeats, resumes with the last sequence, and drops duplicate dispatches", async () => {
   const app = gatewayFixture();
   await app.gateway.start();
@@ -295,7 +317,11 @@ test("Discord Gateway reconnects a missing heartbeat ACK and stops on disallowed
 });
 
 test("Discord Gateway rejects credential-exfiltrating URLs and session/shard limits before connecting", async () => {
-  for (const url of ["wss://evil.example", "ws://gateway.discord.gg", "wss://gateway.discord.gg.evil.example", "wss://your_username:your_password_here@gateway.discord.gg"]) {
+  for (const url of ["wss://evil.example", "ws://gateway.discord.gg", "wss://gateway.discord.gg.evil.example", "wss://your_username:your_password_here@gateway.discord.gg",
+    "wss://gateway-us-east1-b.discord.gg.evil.example", "wss://gateway-us-east1-b.evil.example",
+    "wss://evil-discord.gg", "wss://gateway-.discord.gg", "wss://gateway--us-east1-b.discord.gg",
+    "wss://gateway-us-east1-b.discord.gg:8443", "ws://gateway-us-east1-b.discord.gg",
+    "wss://your_username:your_password_here@gateway-us-east1-b.discord.gg"]) {
     assert.throws(() => gatewayUrl(url));
   }
   const app = gatewayFixture();
@@ -303,6 +329,31 @@ test("Discord Gateway rejects credential-exfiltrating URLs and session/shard lim
   await assert.rejects(app.gateway.start());
   app.gateway.rest.request = async () => ({ url: "wss://gateway.discord.gg", shards: 2, session_start_limit: { remaining: 10 } });
   await assert.rejects(app.gateway.start());
+});
+
+test("malformed READY fields stop with distinct safe diagnostics and never dispatch READY", async () => {
+  const cases = [
+    [null, "ready_session_id"],
+    [{ ...ready, session_id: "", resume_gateway_url: "wss://gateway.discord.gg" }, "ready_session_id"],
+    [{ ...ready, session_id: 123, resume_gateway_url: "wss://gateway.discord.gg" }, "ready_session_id"],
+    [{ ...ready, session_id: "synthetic_session" }, "ready_gateway_url"],
+    [{ ...ready, session_id: "synthetic_session", resume_gateway_url: "wss://evil.example/synthetic_discord_credential" }, "ready_gateway_url"],
+  ];
+  for (const [data, kind] of cases) {
+    const app = gatewayFixture();
+    await app.gateway.start();
+    const socket = FakeSocket.instances.at(-1);
+    socket.packet(10, { heartbeat_interval: 1000 });
+    socket.packet(0, data, { s: 1, t: "READY" });
+    await tick();
+    assert.deepEqual(app.fatal, [kind]);
+    assert.deepEqual(app.events, []);
+    assert.equal(app.gateway.sessionId, null);
+    assert.equal(app.gateway.resumeUrl, null);
+    assert.equal(app.timers.pending.size, 0);
+    assert.deepEqual(socket.closes, [1000]);
+    assert.deepEqual(app.logs, [`Discord gateway stopped: ${kind}.`]);
+  }
 });
 
 test("slash registration previews without network and backs up before individual upserts", async () => {
