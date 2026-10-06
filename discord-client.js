@@ -59,7 +59,8 @@ function gatewayUrl(value) {
   let url;
   try { url = new URL(value); } catch { throw new DiscordError("gateway_url"); }
   if (url.protocol !== "wss:" || url.username || url.password || url.port ||
-      !(url.hostname === "gateway.discord.gg" || url.hostname.endsWith(".gateway.discord.gg"))) {
+      !(url.hostname === "gateway.discord.gg" || url.hostname.endsWith(".gateway.discord.gg") ||
+        /^gateway(?:-[a-z0-9]+)+\.discord\.gg$/.test(url.hostname))) {
     throw new DiscordError("gateway_url");
   }
   url.search = "?v=10&encoding=json";
@@ -185,11 +186,15 @@ class DiscordGateway {
         if (!Number.isSafeInteger(packet.s) || (this.sequence !== null && packet.s <= this.sequence)) return;
         this.sequence = packet.s;
         if (packet.t === "READY") {
+          if (typeof packet.d?.session_id !== "string" || !packet.d.session_id) {
+            this.fatal("ready_session_id"); return;
+          }
+          let resumeUrl;
           try {
-            if (typeof packet.d?.session_id !== "string" || !packet.d.session_id) throw new Error();
-            this.sessionId = packet.d.session_id;
-            this.resumeUrl = gatewayUrl(packet.d.resume_gateway_url);
-          } catch { this.fatal("ready_protocol"); return; }
+            resumeUrl = gatewayUrl(packet.d.resume_gateway_url);
+          } catch { this.fatal("ready_gateway_url"); return; }
+          this.sessionId = packet.d.session_id;
+          this.resumeUrl = resumeUrl;
           this.attempts = 0;
           this.timers.clearTimeout(this.readyTimer);
           this.logger.log("Discord gateway ready.");

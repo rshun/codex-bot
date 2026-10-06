@@ -226,6 +226,36 @@ journalctl -u codex-discord-bot.service -n 30 --no-pager
 
 固定错误：`dependency_missing` 检查已有 Node 依赖；HTTP 401 检查凭据，403 检查权限；`close_4014` 检查 Message Content Intent；`node_websocket_required` 检查 Node 和启动参数。断线和无心跳 ACK 会恢复连接；连续十次恢复失败、认证/意图不允许或会话启动额度不足时停止，交由 systemd 的有限重启策略处理。不记录原始错误、Token 或 Gateway session 信息。
 
+**READY 握手启动故障：** 初始 Discord 版的地址校验过严，会拒绝 `gateway-us-east1-b.discord.gg` 这类区域恢复地址，记录 `ready_protocol` 并退出。修复版支持 Discord 区域 Gateway，同时继续拒绝外部域名、明文 WebSocket、带凭据或非默认端口的地址。READY 缺少有效会话 ID 时记录 `ready_session_id`，恢复地址无效时记录 `ready_gateway_url`，不输出握手原文或会话凭据。[官方 Gateway 说明](https://docs.discord.com/developers/events/gateway)要求断线恢复使用 READY 返回的 `resume_gateway_url`。
+
+该修复只涉及 Discord 客户端逻辑，不改变依赖、配置或状态格式，无需重置 Bot Token 或重新注册命令。在 myServer 的实际服务账号下，确认目录和分支正确、工作区干净，再备份旧客户端；任何检查、备份、拉取或测试失败，都不要重启：
+
+```bash
+cd /home/codex/codex-tg-bot
+git branch --show-current
+git status --short
+# 确认当前为 master 且没有未提交修改后继续。
+umask 077
+READY_BACKUP_DIR="$PWD/.local-backups/$(date +%Y%m%d-%H%M%S)-discord-ready"
+mkdir -p "$READY_BACKUP_DIR"
+cp -a -- discord-client.js "$READY_BACKUP_DIR/discord-client.js"
+git rev-parse HEAD > "$READY_BACKUP_DIR/revision.txt"
+git pull --ff-only origin master
+node --check discord-client.js
+npm test
+node discord.js --check-config
+```
+
+确认新代码已经包含区域 Gateway 修复，再手动执行下面的重启。重启会短暂中断 Discord 连接并终止其正在执行的任务，只影响 Discord 服务；Telegram 无需重启：
+
+```bash
+sudo systemctl restart codex-discord-bot.service
+systemctl is-active codex-discord-bot.service
+journalctl -u codex-discord-bot.service --since "5 minutes ago" --no-pager
+```
+
+验收新日志中出现 `Discord gateway ready.`，服务不再反复退出，再发送 `!status`、`!help` 和普通文字确认实际回复。若仍然失败，检查修复版的固定错误类别；不要发送 Token、READY 原文或 Gateway 会话 ID。回滚时先备份当前客户端，确认原 `READY_BACKUP_DIR` 和 `revision.txt` 属于此次更新，再由操作者手动用 `cp -a -- "$READY_BACKUP_DIR/discord-client.js" discord-client.js` 恢复，语法检查通过后受控重启。该回滚只恢复源码，Git HEAD 不变，工作区会出现已知修改，原地址校验故障也会恢复；配置、状态及 Codex 历史不覆盖。
+
 回滚新增服务会中断 Discord 任务并离线。确认空闲、备份当前源码/配置/状态后，由操作者执行 `sudo systemctl disable --now codex-discord-bot.service`，只影响 Discord。unit、配置及状态可以保留，不需要删除。回滚已有 Discord 部署时成套恢复源码和 unit，检查后 `daemon-reload` 并受控重启；不能换入 Telegram 状态。斜杠命令独立于源码，停服务不删除命令，旧定义需按私有备份逐项审查恢复。
 
 ## 部署与回滚
