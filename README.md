@@ -4,7 +4,7 @@
 
 同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
 
-`v1.1.0` 新增私聊定时消息。已有 Debian 服务使用运行包升级时，请按 [v1.1.0 升级步骤](UPGRADE-v1.1.0.md) 保留实际配置、会话及定时消息状态路径。
+`v1.2.0` 支持用“每天晚上9点提醒我喝水”等自然语言创建私聊提醒，TG 和 Discord 均可使用。已有 Debian 服务使用运行包升级时，请按 [v1.2.0 升级步骤](UPGRADE-v1.2.0.md) 保留实际配置、会话及定时消息状态路径。
 
 远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
 
@@ -15,7 +15,7 @@ git remote -v
 
 ## 运行前检查
 
-需要项目已有的 Node.js 依赖和已登录的 Codex CLI。本次功能没有新增依赖，`package-lock.json` 保持不变。不要把本机安装的 CLI 版本当作 Debian 服务实际使用的版本。
+需要项目已有的 Node.js 依赖和已登录的 Codex CLI。本次功能没有新增依赖，锁定的依赖版本保持不变。不要把本机安装的 CLI 版本当作 Debian 服务实际使用的版本。
 
 在 **Bot 实际运行的 Debian 账号** 下检查以下命令。CLI 路径是项目默认值，如果配置了其他 `CODEX_BIN`，请替换为实际路径：
 
@@ -120,7 +120,21 @@ npm start
 /cancelreminder 任务ID
 ```
 
-`/remind` 指定日期时只发送一次；`daily` 每天发送，当天时间已到则从次日开始。保存成功后返回 8 位任务 ID、下一次发送时间和内容；`/reminders` 显示最近 20 条记录和发送结果。只支持精确的 `YYYY-MM-DD HH:mm` 或 `daily HH:mm` 格式，不让模型猜测自然语言时间。内容上限 1000 字符，环境凭据会在保存及发送前脱敏；不要在提醒中放真实密钥或密码。`/new` 不取消定时消息，需单独使用 `/cancelreminder`。
+`/remind` 指定日期时只发送一次；`daily` 每天发送，当天时间已到则从次日开始。保存成功后返回 8 位任务 ID、下一次发送时间和内容；`/reminders` 显示最近 20 条记录和发送结果。内容上限 1000 字符，环境凭据会在保存及发送前脱敏；不要在提醒中放真实密钥或密码。`/new` 不取消定时消息，需单独使用 `/cancelreminder`。
+
+**自然语言创建（v1.2.0 起支持；v1.1.0 运行包仍需命令）：** TG 私聊可直接发送以下文字，Discord 私聊也适用，无需调用模型或新增配置：
+
+```text
+每天晚上9点提醒我喝水
+明天早上八点半提醒我吃早餐
+今天下午3点30分提醒我开会
+今晚9点提醒我休息
+2026年10月19日 08:30 提醒我出门
+```
+
+按明确格式识别“每天/每日、今天、明天、后天、今晚、明早、具体年月日 + 时间 + 提醒我 + 内容”，支持数字或中文时分，以及“半、一刻、三刻”；可在开头加“请”“帮我”“请帮我”。`09:00` 使用 24 小时制；“9点”须注明早上、上午、中午、下午、晚上或凌晨，“21点”可直接识别。“晚上12点”等日期不明确、时段冲突、每周/每月任务会提示补充，不会创建；一次性时间已经过去也不会自动顺延。所有时间仍为北京时间，每天任务当天已过则从明天开始。这里是有限格式识别，不支持任意自然语言或多条任务混合。
+
+仅在收到“已保存定时消息”及任务 ID 后才表示保存成功，可用 `/reminders` 核对，用 `/cancelreminder 任务ID` 取消。询问如何设置、引用示例等普通对话仍交给 Codex；需要讨论完整的提醒指令时可显式使用 `/codex 每天晚上9点提醒我喝水`。升级后备份和保留原 `REMINDER_FILE`，状态格式不变，旧任务继续有效；回滚到 v1.1.0 时已创建任务仍会调度，只是新建任务恢复为命令输入。验收时分别创建未来时间的自然语言提醒、确认收到一次，并检查含糊时间和群聊请求未创建任务。
 
 Discord 普通文字命令也可写成 `!remind daily 21:30 准备休息`、`!reminders` 和 `!cancelreminder 任务ID`。新增原生斜杠命令是 `/remind details:...`、`/reminders`、`/cancelreminder id:...`，使用前按本文步骤预览并重新注册。定时发送使用 Bot 私聊接口，不保存或复用短期 interaction token，不向频道发送，也不会触发用户/角色提及。Discord 需保持 `DISCORD_ALLOW_DMS=true`，并允许 Bot 发私信；关闭此配置会暂停已有定时消息。TG 用户需先在 Bot 私聊中发送 `/start`，且不能屏蔽 Bot。
 
@@ -343,8 +357,8 @@ systemctl show codex-discord-bot.service --property=User,WorkingDirectory,Fragme
 
 | 服务 | 需要核对的字段（示例路径） |
 | --- | --- |
-| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.1.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
-| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.1.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
+| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.2.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
+| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.2.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
 
 systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
 
@@ -365,7 +379,7 @@ journalctl -u codex-discord-bot.service -n 30 --no-pager
 
 构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
 
-已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.1.0`，不要覆盖旧包或校验文件。
+已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.2.0`，不要覆盖旧包或校验文件。
 
 ### Git 仓库部署方式
 
