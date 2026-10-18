@@ -167,7 +167,7 @@ async function buildExecutable({ root = ROOT, output, target = `${process.platfo
     manifest.files[relative] = hash(content);
   };
   manifest.files[binaryName] = hash(fs.readFileSync(executable));
-  for (const relative of [".env.example", ".env.discord.example", "deploy/EXECUTABLE.md"]) {
+  for (const relative of [".env.example", ".env.discord.example", "deploy/EXECUTABLE.md", `UPGRADE-v${pkg.version}.md`]) {
     write(relative, fs.readFileSync(path.join(root, relative)));
   }
   write("licenses/Node-LICENSE", licenseContent);

@@ -485,6 +485,8 @@ journalctl -u "$BOT_UNIT" -n 50 --no-pager
 
 支持把 Node 运行时、TG/Discord 代码和依赖打包为一个可执行文件，分别运行 `codex-bot telegram` 与 `codex-bot discord`。配置、会话和提醒继续保存在程序外，Codex CLI 保持独立。构建、原路径迁移、只读预检、systemd 和回滚说明见 [可执行程序部署](deploy/EXECUTABLE.md)。
 
+v1.7.0 的 TG、Discord 双服务完整升级命令见 [Debian v1.7.0 升级文档](UPGRADE-v1.7.0.md)。
+
 ## Git 与敏感信息
 
 提交源码、依赖声明、锁文件、测试、README 和 `.env.example`；忽略 `node_modules/`、真实 `.env`、`.bot-state/`、测试产物、备份和日志。自定义状态文件不要放进已跟踪路径。

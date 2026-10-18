@@ -153,7 +153,7 @@ systemctl is-active codex-discord-bot.service
 
 ### GitHub Actions（本项目采用）
 
-工作流为 [build-executable.yml](../.github/workflows/build-executable.yml)。推送 `codex/debian-executable` 分支会自动构建；版本标签推送和手动 `workflow_dispatch` 也支持。只有当该工作流已经进入默认分支后，GitHub 才会显示相应手动运行入口。工作流只生成 Actions artifacts，不自动创建 GitHub Release 或部署服务器。
+工作流为 [build-executable.yml](../.github/workflows/build-executable.yml)。推送 `codex/debian-executable` 分支会自动构建；版本标签推送和手动 `workflow_dispatch` 也支持。只有当该工作流已经进入默认分支后，GitHub 才会显示相应手动运行入口。默认只生成 Actions artifacts；在版本标签上手动运行并明确勾选 `publish_release` 时，才验证标签/版本/源提交与包内全部哈希、创建草稿、下载比对附件并发布 GitHub Release。工作流不部署服务器。
 
 两个原生 runner 分别构建 `linux-x64`、`linux-arm64`，临时安装锁定的现有运行依赖及隔离构建工具，运行完整回归，验证归档校验值，再运行提取后的程序。另用固定镜像摘要的 Debian 12 容器检查两个平台入口：镜像含系统基础库，不含 Node/npm；校验时关闭网络、使用只读系统，并以测试数据所有者的 UID/GID 读取合成的旧配置、会话、v2 提醒。检查前后对比数据字节，不接入真实 Bot 或模型。所有安装只发生在 GitHub 临时 runner 中。
 
