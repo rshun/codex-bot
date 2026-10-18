@@ -4,6 +4,7 @@ const { SessionStore, MODEL_NAME } = require("./session-store");
 const { runCodex } = require("./codex-runner");
 const { formatUsage } = require("./usage");
 const { queryQuota, formatQuota } = require("./quota");
+const { ReminderScheduler } = require("./reminders");
 
 function loadConfig(env, { platform = "telegram" } = {}) {
   if (!["telegram", "discord"].includes(platform)) throw new Error("无效的平台配置。");
@@ -27,13 +28,17 @@ function loadConfig(env, { platform = "telegram" } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) {
     throw new Error("CODEX_TIMEOUT_MS 必须为 1000 到 3600000 的整数。");
   }
+  const sessionFile = path.resolve(env.SESSION_FILE || path.join(__dirname, ".bot-state",
+    platform === "discord" ? "discord-sessions.json" : "sessions.json"));
+  const reminderFile = path.resolve(env.REMINDER_FILE || path.join(path.dirname(sessionFile), `${platform}-reminders.json`));
+  const sameStateFile = process.platform === "win32" ? reminderFile.toLowerCase() === sessionFile.toLowerCase() : reminderFile === sessionFile;
+  if (sameStateFile) throw new Error("REMINDER_FILE 不能与 SESSION_FILE 相同。");
   return {
     platform, allowedUserId: env[userField],
     bin: env.CODEX_BIN || "/home/codex/.local/bin/codex",
     workdir: path.resolve(env.WORKDIR || (platform === "discord" ? "/home/codex/discord-workdir" : "/home/codex")),
     codexHome: path.resolve(env.CODEX_HOME || path.join(os.homedir(), ".codex")),
-    sessionFile: path.resolve(env.SESSION_FILE || path.join(__dirname, ".bot-state",
-      platform === "discord" ? "discord-sessions.json" : "sessions.json")),
+    sessionFile, reminderFile,
     defaultModel, models, timeoutMs, env,
   };
 }
@@ -70,7 +75,7 @@ function createRedactor(env) {
 }
 
 function createMessageHandler({ bot, store, config, botUsername = "", runner = runCodex,
-                                quotaReader = queryQuota, transport, logger = console }) {
+                                quotaReader = queryQuota, transport, reminders, logger = console }) {
   const busy = new Set();
   const stateFailures = new Set();
   let quotaRequest;
@@ -86,6 +91,10 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/status — 查看会话和运行状态",
     "/usage — 查看当前会话最近的 token 报告",
     "/quota — 查询账号额度和重置时间",
+    "/remind YYYY-MM-DD HH:mm 内容 — 指定时间私聊提醒（北京时间）",
+    "/remind daily HH:mm 内容 — 每天私聊提醒",
+    "/reminders — 查看定时消息（仅私聊）",
+    "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
     `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
   ].join("\n");
 
@@ -111,6 +120,13 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     const argument = command?.[3]?.trim() || "";
     if (name === "id") return reply(msg, `你的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID：${msg.from.id}`);
     if (String(msg.from.id) !== config.allowedUserId) return reply(msg, "未授权。");
+
+    if (["remind", "reminders", "cancelreminder"].includes(name)) {
+      const privateChat = config.platform === "discord" ? msg.chat.type === "private"
+        : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
+      if (!privateChat) return reply(msg, "定时消息请在与 Bot 的私聊中设置和管理。");
+      return reply(msg, reminders ? reminders.command(name, argument) : "定时消息功能尚未启用。");
+    }
 
     const key = `${config.platform === "discord" ? "discord:" : ""}${msg.chat.id}:${msg.message_thread_id || 0}:${msg.from.id}`;
     const session = store.get(key);
@@ -224,6 +240,7 @@ async function startBot() {
   require("dotenv").config({ quiet: true });
   let config;
   let store;
+  let reminders;
   try {
     config = loadConfig(process.env);
     store = new SessionStore(config.sessionFile, config);
@@ -236,13 +253,20 @@ async function startBot() {
   const TelegramBotModule = require("node-telegram-bot-api");
   const TelegramBot = TelegramBotModule.default || TelegramBotModule;
   const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
+  try {
+    reminders = new ReminderScheduler({ filename: config.reminderFile, platform: "telegram",
+      userId: config.allowedUserId, sanitize: createRedactor(config.env),
+      send: (userId, text) => bot.sendMessage(userId, text) });
+  } catch { console.error("Telegram reminder state failed; check REMINDER_FILE."); process.exitCode = 1; return; }
   bot.on("polling_error", () => console.error("Telegram polling failed; check connection and bot configuration."));
   const identity = await bot.getMe();
-  const handler = createMessageHandler({ bot, store, config, botUsername: identity.username });
+  const handler = createMessageHandler({ bot, store, config, reminders, botUsername: identity.username });
   bot.on("message", (msg) => {
     handler(msg).catch(() => console.error("Telegram message handling failed."));
   });
   await bot.startPolling();
+  reminders.start();
+  for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => { reminders.stop(); process.exit(0); });
   console.log("Codex Telegram Bot started.");
 }
 

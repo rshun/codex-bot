@@ -42,7 +42,7 @@ test("release archive is complete, portable and excludes private files and sourc
   `;
   execFileSync(process.execPath, ["-e", smoke], { cwd: directory });
   const commands = JSON.parse(execFileSync(process.execPath, ["discord.js", "--register-commands"], { cwd: directory, encoding: "utf8" }));
-  assert.equal(commands.length, 9);
+  assert.equal(commands.length, 12);
   for (const platform of ["tg", "discord"]) {
     const unit = fs.readFileSync(path.join(directory, `deploy/codex-${platform}-bot.service.example`), "utf8");
     assert.ok(unit.includes(`/releases/${path.basename(directory)}/`));

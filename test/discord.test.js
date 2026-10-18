@@ -370,9 +370,9 @@ test("slash registration previews without network and backs up before individual
   assert.deepEqual(await registerCommands(config, rest), COMMANDS);
   assert.equal(calls.length, 0);
   const result = await registerCommands(config, rest, { apply: true, backupRoot });
-  assert.equal(result.count, 9);
+  assert.equal(result.count, 12);
   assert.deepEqual(JSON.parse(fs.readFileSync(result.backup, "utf8")), [{ name: "unrelated-command" }]);
-  assert.equal(calls.filter((call) => call.method === "POST").length, 9);
+  assert.equal(calls.filter((call) => call.method === "POST").length, 12);
   assert.equal(calls.filter((call) => ["DELETE", "PUT"].includes(call.method)).length, 0);
 });
 

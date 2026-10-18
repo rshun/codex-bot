@@ -5,8 +5,8 @@ const { execFileSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const APP_FILES = ["index.js", "discord.js", "discord-client.js", "codex-runner.js",
-  "session-store.js", "usage.js", "quota.js", "package.json", "package-lock.json",
-  ".env.example", ".env.discord.example", "README.md"];
+  "session-store.js", "usage.js", "quota.js", "reminders.js", "package.json", "package-lock.json",
+  ".env.example", ".env.discord.example", "README.md", "UPGRADE-v1.1.0.md"];
 const DEPENDENCIES = ["dotenv", "node-telegram-bot-api"];
 const hash = (content) => crypto.createHash("sha256").update(content).digest("hex");
 

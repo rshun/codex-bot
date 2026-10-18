@@ -1,8 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { loadConfig, splitMessage, createMessageHandler } = require("./index");
+const { loadConfig, splitMessage, createMessageHandler, createRedactor } = require("./index");
 const { SessionStore } = require("./session-store");
 const { DiscordRest, DiscordGateway, DiscordError } = require("./discord-client");
+const { ReminderScheduler } = require("./reminders");
 
 const SNOWFLAKE = /^[1-9]\d{0,19}$/;
 const COMMANDS = [
@@ -17,6 +18,13 @@ const COMMANDS = [
   { name: "status", description: "查看会话和运行状态" },
   { name: "usage", description: "查看当前会话最近的 token 报告" },
   { name: "quota", description: "查询 Codex 账号额度和重置时间" },
+  { name: "remind", description: "在私聊创建定时消息，时间按北京时间", options: [
+    { type: 3, name: "details", description: "YYYY-MM-DD HH:mm 内容；或 daily HH:mm 内容", required: true, max_length: 1100 },
+  ] },
+  { name: "reminders", description: "在私聊查看定时消息及发送结果" },
+  { name: "cancelreminder", description: "在私聊取消定时消息", options: [
+    { type: 3, name: "id", description: "8位任务ID", required: true, max_length: 8 },
+  ] },
   { name: "id", description: "查看自己的 Discord 用户 ID" },
   { name: "help", description: "查看 Bot 帮助" },
 ].map((command) => ({ type: 1, ...command }));
@@ -70,6 +78,18 @@ function createDiscordTransport(rest) {
   };
 }
 
+function createDiscordReminderSender(rest) {
+  return async (userId, text) => {
+    if (!SNOWFLAKE.test(userId)) throw new DiscordError("reminder_recipient");
+    const channel = await rest.request("POST", "/users/@me/channels", { recipient_id: userId });
+    if (!SNOWFLAKE.test(channel?.id)) throw new DiscordError("reminder_channel");
+    // Use Bot-authenticated DMs, never an interaction token that will expire before the scheduled time.
+    await rest.request("POST", `/channels/${channel.id}/messages`, {
+      content: text, allowed_mentions: { parse: [], replied_user: false },
+    });
+  };
+}
+
 function createDiscordDispatcher({ config, rest, handler, logger = console }) {
   let botId;
   let applicationId;
@@ -99,7 +119,7 @@ function createDiscordDispatcher({ config, rest, handler, logger = console }) {
           !permittedChannel(data) || typeof data.content !== "string" || !data.content.trim() || !remember(data.id)) return;
       let text = data.content.replace(new RegExp(`^<@!?${botId}>\\s*`), "");
       text = text.replace(/^!([a-z]+)(?=\s|$)/i, "/$1");
-      const msg = { text, chat: { id: data.channel_id }, from: { id: data.author.id }, message_id: data.id };
+      const msg = { text, chat: { id: data.channel_id, type: data.guild_id ? "group" : "private" }, from: { id: data.author.id }, message_id: data.id };
       await handler(msg);
     } else if (type === "INTERACTION_CREATE") {
       if (data.type !== 2 || data.application_id !== applicationId || !SNOWFLAKE.test(data.id) ||
@@ -122,7 +142,7 @@ function createDiscordDispatcher({ config, rest, handler, logger = console }) {
       try { await callback(data, { type: 5, data: { flags: 64 } }); }
       catch { logger.error("Discord acknowledgement failed; task not started."); return; }
       await handler({ text: `/${name}${options.length ? ` ${options[0].value}` : ""}`,
-        chat: { id: data.channel_id }, from: { id: user.id }, message_id: data.id,
+        chat: { id: data.channel_id, type: data.guild_id ? "group" : "private" }, from: { id: user.id }, message_id: data.id,
         interaction: { applicationId, token: data.token } });
     }
   };
@@ -156,12 +176,17 @@ async function startDiscord() {
   const store = new SessionStore(config.sessionFile, config);
   const rest = new DiscordRest(config.token);
   const transport = createDiscordTransport(rest);
-  const handler = createMessageHandler({ config, store, transport });
+  const reminders = new ReminderScheduler({ filename: config.reminderFile, platform: "discord",
+    userId: config.allowedUserId, enabled: config.allowDms, sanitize: createRedactor(config.env),
+    send: createDiscordReminderSender(rest) });
+  const handler = createMessageHandler({ config, store, transport, reminders });
   const dispatch = createDiscordDispatcher({ config, rest, handler });
-  const gateway = new DiscordGateway({ rest, token: config.token, onDispatch: dispatch,
-    onFatal: () => { process.exitCode = 1; process.exit(1); } });
+  const gateway = new DiscordGateway({ rest, token: config.token, onDispatch: async (type, data) => {
+    await dispatch(type, data);
+    if (type === "READY") reminders.start();
+  }, onFatal: () => { reminders.stop(); process.exitCode = 1; process.exit(1); } });
   await gateway.start();
-  for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => { gateway.stop(); process.exit(0); });
+  for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => { reminders.stop(); gateway.stop(); process.exit(0); });
   return gateway;
 }
 
@@ -177,14 +202,17 @@ async function main(args = process.argv.slice(2)) {
   if (args.includes("--check-config")) {
     const config = loadDiscordConfig(process.env);
     new SessionStore(config.sessionFile, config);
+    new ReminderScheduler({ filename: config.reminderFile, platform: "discord", userId: config.allowedUserId });
     if (typeof globalThis.WebSocket !== "function") throw new DiscordError("node_websocket_required");
     try { fs.accessSync(config.workdir, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK); }
     catch { throw new DiscordError("working_directory"); }
     try {
-      let parent = path.dirname(config.sessionFile);
-      while (!fs.existsSync(parent)) parent = path.dirname(parent);
-      fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
-      if (fs.existsSync(config.sessionFile)) fs.accessSync(config.sessionFile, fs.constants.R_OK | fs.constants.W_OK);
+      for (const filename of [config.sessionFile, config.reminderFile]) {
+        let parent = path.dirname(filename);
+        while (!fs.existsSync(parent)) parent = path.dirname(parent);
+        fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
+        if (fs.existsSync(filename)) fs.accessSync(filename, fs.constants.R_OK | fs.constants.W_OK);
+      }
       if (path.isAbsolute(config.bin)) fs.accessSync(config.bin, fs.constants.X_OK);
     } catch { throw new DiscordError("local_permissions"); }
     console.log("Discord configuration and local paths checked; no network requests or state writes.");
@@ -208,4 +236,4 @@ if (require.main === module) main().catch((error) => {
 });
 
 module.exports = { loadDiscordConfig, createDiscordTransport, createDiscordDispatcher,
-  registerCommands, startDiscord, COMMANDS };
+  createDiscordReminderSender, registerCommands, startDiscord, COMMANDS };
