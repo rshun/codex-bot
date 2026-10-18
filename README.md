@@ -314,6 +314,8 @@ journalctl -u codex-discord-bot.service --since "5 minutes ago" --no-pager
 
 ## 部署与回滚
 
+TG 和 Discord 一次升级到 v1.6.0 可使用独立脚本 [deploy/upgrade-v1.6.0.sh](deploy/upgrade-v1.6.0.sh)，提供本地检查、模型预检、备份、双服务切换和回滚。用法、默认路径及执行边界见 [脚本说明](deploy/UPGRADE-SCRIPT.md)。
+
 ### GitHub 发布包部署（服务器无需 Git 或 npm）
 
 从 [GitHub Releases](https://github.com/rshun/codex-bot/releases) 下载对应版本的 `codex-bot-v版本-node.tar.gz` 和 `SHA256SUMS`。不要使用 GitHub 自动生成的 Source code 压缩包，它不包含运行依赖。发布包同时提供 Telegram、Discord、锁定的现有依赖、许可证、示例配置、服务示例和逐文件哈希清单 `release-manifest.json`。运行文件仍为 JavaScript；服务器需要 Node.js 22.4 或以上和已经安装、登录的 Codex CLI，部署时无需拉取仓库、构建或执行 npm 安装。
@@ -478,6 +480,10 @@ journalctl -u "$BOT_UNIT" -n 50 --no-pager
 不自动恢复 `.env`、Bot 状态或 Codex 历史；只有确认必须恢复且当前文件已另行备份时，才逐项处理。上下文/模型版会忽略新增 token 字段，后续保存可能清除报告，但会话 ID 和模型仍可使用。首版会失去上下文和模型命令。新增模块可以保留，不需要删除。
 
 这种恢复只回滚运行文件，不改变 Git 分支或 HEAD，因此 `git status` 会显示恢复后的本地修改。下次升级前必须先处理这些已知回滚改动，不能在脏工作区直接拉取。不要使用 `git reset --hard`、`git clean` 或强制推送，也不要用早期状态备份覆盖升级期间新产生的会话。
+
+## Debian 可执行程序
+
+支持把 Node 运行时、TG/Discord 代码和依赖打包为一个可执行文件，分别运行 `codex-bot telegram` 与 `codex-bot discord`。配置、会话和提醒继续保存在程序外，Codex CLI 保持独立。构建、原路径迁移、只读预检、systemd 和回滚说明见 [可执行程序部署](deploy/EXECUTABLE.md)。
 
 ## Git 与敏感信息
 

@@ -1,0 +1,26 @@
+# Preserve the existing account and all configured state/workspace paths.
+[Unit]
+Description=Codex Discord Bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=codex
+Group=codex
+WorkingDirectory=/home/codex/codex-tg-bot
+Environment=NODE_ENV=production
+Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord
+Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json
+Environment=REMINDER_FILE=/home/codex/codex-tg-bot/.bot-state/discord-reminders.json
+ExecStart=/home/codex/codex-tg-bot/releases/@RELEASE_NAME@/codex-bot discord --config-dir /home/codex/codex-tg-bot
+Restart=on-failure
+RestartSec=15
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

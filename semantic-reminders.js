@@ -1,9 +1,8 @@
-const path = require("node:path");
+const { schemaFile } = require("./runtime-paths");
 const { randomUUID, createHash } = require("node:crypto");
 const { parseTime, nextDaily, formatTime } = require("./reminders");
 const { CalendarError } = require("./china-calendar");
 
-const outputSchema = path.join(__dirname, "reminder-response.schema.json");
 const active = task => ["pending", "sending", "calendar_wait"].includes(task.status);
 const fingerprint = scheduler => createHash("sha256").update(JSON.stringify(scheduler.items)).digest("hex");
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) &&
@@ -11,6 +10,7 @@ const exactKeys = (value, keys) => value && typeof value === "object" && !Array.
 
 // One model turn serves both conversation and reminder planning. No phrase/keyword routing.
 function prepareTurn({ scheduler, text, privateChat, allowActions = true, receipt = "", redact = value => value }) {
+  const outputSchema = schemaFile();
   const nonce = randomUUID();
   const tasks = privateChat ? scheduler.items.filter(active).concat(scheduler.items.filter(task => !active(task)).slice(-20)) : [];
   const snapshot = privateChat ? fingerprint(scheduler) : "";
@@ -136,4 +136,4 @@ function applyResponse(text, turn, scheduler) {
   }
 }
 
-module.exports = { prepareTurn, parseResponse, applyResponse, outputSchema };
+module.exports = { prepareTurn, parseResponse, applyResponse, get outputSchema() { return schemaFile(); } };

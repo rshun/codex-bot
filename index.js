@@ -1,5 +1,6 @@
 const path = require("node:path");
 const os = require("node:os");
+const { dataDirectory, defaultCalendarFile, checkLocalPaths } = require("./runtime-paths");
 const { SessionStore, MODEL_NAME } = require("./session-store");
 const { runCodex } = require("./codex-runner");
 const { formatUsage } = require("./usage");
@@ -29,7 +30,7 @@ function loadConfig(env, { platform = "telegram" } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) {
     throw new Error("CODEX_TIMEOUT_MS 必须为 1000 到 3600000 的整数。");
   }
-  const sessionFile = path.resolve(env.SESSION_FILE || path.join(__dirname, ".bot-state",
+  const sessionFile = path.resolve(env.SESSION_FILE || path.join(dataDirectory(), ".bot-state",
     platform === "discord" ? "discord-sessions.json" : "sessions.json"));
   const reminderFile = path.resolve(env.REMINDER_FILE || path.join(path.dirname(sessionFile), `${platform}-reminders.json`));
   const sameStateFile = process.platform === "win32" ? reminderFile.toLowerCase() === sessionFile.toLowerCase() : reminderFile === sessionFile;
@@ -39,7 +40,7 @@ function loadConfig(env, { platform = "telegram" } = {}) {
     bin: env.CODEX_BIN || "/home/codex/.local/bin/codex",
     workdir: path.resolve(env.WORKDIR || (platform === "discord" ? "/home/codex/discord-workdir" : "/home/codex")),
     codexHome: path.resolve(env.CODEX_HOME || path.join(os.homedir(), ".codex")),
-    sessionFile, reminderFile, calendarFile: path.resolve(env.HOLIDAY_CALENDAR_FILE || path.join(__dirname, "china-calendar.json")),
+    sessionFile, reminderFile, calendarFile: env.HOLIDAY_CALENDAR_FILE ? path.resolve(env.HOLIDAY_CALENDAR_FILE) : defaultCalendarFile(),
     defaultModel, models, timeoutMs, env,
   };
 }
@@ -296,11 +297,22 @@ async function startBot() {
   console.log("Codex Telegram Bot started.");
 }
 
+async function main(args = process.argv.slice(2)) {
+  if (!args.length) return startBot();
+  if (args.length !== 1 || args[0] !== "--check-config") throw new Error("arguments");
+  require("dotenv").config({ quiet: true, debug: false });
+  const config = loadConfig(process.env);
+  new SessionStore(config.sessionFile, config);
+  new ReminderScheduler({ filename: config.reminderFile, platform: "telegram", userId: config.allowedUserId, calendarFile: config.calendarFile });
+  checkLocalPaths(config);
+  console.log("Telegram configuration and local paths checked; no network requests or state writes.");
+}
+
 if (require.main === module) {
-  startBot().catch(() => {
+  main().catch(() => {
     console.error("Bot startup failed; check Telegram credentials and network.");
     process.exitCode = 1;
   });
 }
 
-module.exports = { loadConfig, splitMessage, createRedactor, createMessageHandler };
+module.exports = { loadConfig, splitMessage, createRedactor, createMessageHandler, startBot, main };

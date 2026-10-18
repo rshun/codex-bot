@@ -1,0 +1,92 @@
+name: Build Debian executables
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/debian-executable
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      TARGET: ${{ matrix.target }}
+      CODEX_BOT_V160_ARCHIVE: ${{ github.workspace }}/.test-artifacts/codex-bot-v1.6.0-node.tar.gz
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+      - name: Restore locked runtime dependencies in the temporary runner
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install isolated build tools in the temporary runner
+        run: npm install --prefix .local-build-tools --no-audit --no-fund --save-exact esbuild@0.28.2 postject@1.0.0-alpha.6
+      - name: Prepare trusted offline updater-test archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .test-artifacts
+          curl --fail --silent --show-error --location --output "$CODEX_BOT_V160_ARCHIVE" https://github.com/rshun/codex-bot/releases/download/v1.6.0/codex-bot-v1.6.0-node.tar.gz
+          printf '%s  %s\n' 'e20db6106dd7afc4e73594ccb9bf412cabeb0c1410e9e0279e75aff2100db863' "$CODEX_BOT_V160_ARCHIVE" | sha256sum -c -
+      - name: Run offline regression tests
+        run: npm test
+      - name: Build native single executable and archive
+        run: node scripts/build-executable.js --target "$TARGET" --output "dist/$TARGET"
+      - name: Verify the extracted executable with existing session and reminder fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "dist/$TARGET"
+          sha256sum -c SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p ".test-artifacts/standalone-$TARGET"
+          archives=(dist/"$TARGET"/*.tar.gz)
+          tar -xzf "${archives[0]}" -C ".test-artifacts/standalone-$TARGET"
+          binaries=(.test-artifacts/standalone-"$TARGET"/*/codex-bot)
+          CODEX_BOT_TEST_EXECUTABLE="$GITHUB_WORKSPACE/${binaries[0]}" node --test test/executable.test.js
+      - name: Verify on Debian 12 with no Node installation or network
+        shell: bash
+        run: |
+          set -euo pipefail
+          binaries=(.test-artifacts/standalone-"$TARGET"/*/codex-bot)
+          binary_dir="$(dirname "$GITHUB_WORKSPACE/${binaries[0]}")"
+          node scripts/smoke-debian.js prepare
+          docker build --tag codex-bot-debian-smoke --file deploy/executable/Dockerfile.smoke deploy/executable
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,src=$binary_dir,dst=/package,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/.test-artifacts/debian-smoke,dst=/fixture" \
+            codex-bot-debian-smoke /bin/sh -eu -c '
+              if command -v node >/dev/null 2>&1; then exit 1; fi
+              /package/codex-bot --version
+              /package/codex-bot telegram --config-dir /fixture --check-config
+              /package/codex-bot discord --config-dir /fixture --check-config
+              /package/codex-bot discord --config-dir /fixture --register-commands >/dev/null
+            '
+          node scripts/smoke-debian.js verify
+      - name: Upload verified executable packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codex-bot-${{ matrix.target }}
+          path: |
+            dist/${{ matrix.target }}/*.tar.gz
+            dist/${{ matrix.target }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
