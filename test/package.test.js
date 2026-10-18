@@ -42,9 +42,11 @@ test("release archive is complete, portable and excludes private files and sourc
     if(parseNaturalReminder('每天晚上9点提醒我喝水').argument!=='daily 21:00 喝水')throw new Error('Natural reminder missing');
     if(parseNaturalReminder('查看我的提醒').command!=='reminders')throw new Error('Natural list missing');
     if(parseNaturalReminder('取消喝水提醒').command!=='cancelmatching')throw new Error('Natural cancellation missing');
+    if(parseNaturalReminder('非工作日早上6点1分、11点2分提醒我测试消息').argument.times.join(',')!=='06:01,11:02')throw new Error('Multiple nonworking times missing');
+    if(require('./china-calendar').ChinaCalendar===undefined||new (require('./china-calendar').ChinaCalendar)().isNonworking(Date.parse('2026-10-10T08:00:00+08:00')))throw new Error('Makeup workday calendar missing');
     const edit=parseNaturalReminder('把喝水提醒改成每天晚上10点');
     if(edit.command!=='reschedule'||edit.argument.schedule!=='daily 22:00')throw new Error('Natural time edit missing');
-    if(!fs.existsSync('UPGRADE-v1.4.0.md'))throw new Error('Upgrade guide missing');
+    if(!fs.existsSync('UPGRADE-v1.5.0.md')||!fs.existsSync('HOLIDAY-CALENDAR.md'))throw new Error('Upgrade/calendar guide missing');
     if(require('./discord-client').gatewayUrl('wss://gateway-us-east1-b.discord.gg')!=='wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json')throw new Error('READY fix missing');
   `;
   execFileSync(process.execPath, ["-e", smoke], { cwd: directory });

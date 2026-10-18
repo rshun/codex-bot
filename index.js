@@ -38,7 +38,7 @@ function loadConfig(env, { platform = "telegram" } = {}) {
     bin: env.CODEX_BIN || "/home/codex/.local/bin/codex",
     workdir: path.resolve(env.WORKDIR || (platform === "discord" ? "/home/codex/discord-workdir" : "/home/codex")),
     codexHome: path.resolve(env.CODEX_HOME || path.join(os.homedir(), ".codex")),
-    sessionFile, reminderFile,
+    sessionFile, reminderFile, calendarFile: path.resolve(env.HOLIDAY_CALENDAR_FILE || path.join(__dirname, "china-calendar.json")),
     defaultModel, models, timeoutMs, env,
   };
 }
@@ -98,6 +98,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
     "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
     "修改时间：把喝水提醒改成每天晚上10点、把提醒 任务ID 改成明天 08:30",
+    "非工作日多时间：非工作日早上6点1分、11点2分提醒我测试消息（中国大陆调休日历）",
     `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
   ].join("\n");
 
@@ -130,6 +131,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
       const privateChat = config.platform === "discord" ? msg.chat.type === "private"
         : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
       if (!privateChat) return reply(msg, "定时消息请在与 Bot 的私聊中设置和管理。");
+      if (natural?.platform && natural.platform !== config.platform) return reply(msg, "未创建任务：这里只能向当前平台的授权用户私聊发送，请在目标平台的 Bot 私聊中设置。");
       if (natural?.error) return reply(msg, natural.error);
       if (natural) return reply(msg, reminders ? reminders.command(natural.command || "remind", natural.argument) : "定时消息功能尚未启用。");
       return reply(msg, reminders ? reminders.command(name, argument) : "定时消息功能尚未启用。");
@@ -262,9 +264,9 @@ async function startBot() {
   const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
   try {
     reminders = new ReminderScheduler({ filename: config.reminderFile, platform: "telegram",
-      userId: config.allowedUserId, sanitize: createRedactor(config.env),
+      userId: config.allowedUserId, sanitize: createRedactor(config.env), calendarFile: config.calendarFile,
       send: (userId, text) => bot.sendMessage(userId, text) });
-  } catch { console.error("Telegram reminder state failed; check REMINDER_FILE."); process.exitCode = 1; return; }
+  } catch { console.error("Telegram reminder state/calendar failed; check REMINDER_FILE and HOLIDAY_CALENDAR_FILE."); process.exitCode = 1; return; }
   bot.on("polling_error", () => console.error("Telegram polling failed; check connection and bot configuration."));
   const identity = await bot.getMe();
   const handler = createMessageHandler({ bot, store, config, reminders, botUsername: identity.username });
