@@ -146,10 +146,12 @@ test("runner decodes split UTF-8 JSONL, saves thread early, and returns only fin
   const split = raw.indexOf(Buffer.from("好")) + 1;
   const mock = mockSpawn({ chunks: [raw.subarray(0, 13), raw.subarray(13, split), raw.subarray(split)] });
   const saved = [];
-  const result = await runWith(mock, { onThread: (thread) => saved.push(thread) });
+  const schemaPath = path.join(runDir, "schema with spaces.json");
+  const result = await runWith(mock, { onThread: (thread) => saved.push(thread), outputSchema: schemaPath });
   assert.deepEqual(result, { ok: true, threadId: THREAD_A, text: "你好😀", usage: null });
   assert.deepEqual(saved, [THREAD_A]);
   assert.equal(mock.calls[0].input, "--model should remain prompt text");
+  assert.equal(mock.calls[0].args[mock.calls[0].args.indexOf("--output-schema") + 1], schemaPath);
   assert.equal(mock.calls[0].options.shell, false);
   assert.equal(mock.calls[0].options.env.TELEGRAM_BOT_TOKEN, undefined);
   assert.equal(mock.calls[0].options.env.CODEX_HOME, context.codexHome);

@@ -54,8 +54,8 @@ function chineseNumber(value) {
   return tens ? (tens[1] ? digits.indexOf(tens[1]) : 1) * 10 + (tens[2] ? digits.indexOf(tens[2]) : 0) : NaN;
 }
 
-// A bounded grammar: only a complete, explicit reminder request bypasses ordinary chat.
-// Keep reminder content untouched; normalize only the time expression.
+// Legacy exported helper retained for compatibility tests. Bot message routing no longer
+// calls this grammar; all natural text uses semantic-reminders and the current Codex thread.
 function parseNaturalReminder(text, now = Date.now()) {
   const request = text.trim().replace(/^(?:请帮我|帮我|请)\s*/, "");
   const management = request.replace(/[。！!]$/, "").trim();
