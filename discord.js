@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { dataDirectory } = require("./runtime-paths");
 const { loadConfig, splitMessage, createMessageHandler, createRedactor } = require("./index");
 const { SessionStore } = require("./session-store");
 const { DiscordRest, DiscordGateway, DiscordError } = require("./discord-client");
@@ -38,7 +39,7 @@ function loadDiscordConfig(env) {
     throw new Error("DISCORD_ALLOW_DMS 必须为 true 或 false。");
   }
   if (config.timeoutMs > 600000) throw new Error("Discord CODEX_TIMEOUT_MS 不能超过 600000，以便在交互有效期内回复。");
-  if (config.sessionFile === path.join(__dirname, ".bot-state", "sessions.json")) {
+  if (config.sessionFile === path.join(dataDirectory(), ".bot-state", "sessions.json")) {
     throw new Error("Discord 不能使用 Telegram 默认状态文件。");
   }
   if (env.DISCORD_APPLICATION_ID && !SNOWFLAKE.test(env.DISCORD_APPLICATION_ID)) {
@@ -148,7 +149,7 @@ function createDiscordDispatcher({ config, rest, handler, logger = console }) {
   };
 }
 
-async function registerCommands(config, rest, { apply = false, backupRoot = path.join(__dirname, ".local-backups") } = {}) {
+async function registerCommands(config, rest, { apply = false, backupRoot = path.join(dataDirectory(), ".local-backups") } = {}) {
   if (!apply) return COMMANDS;
   if (!config.applicationId) throw new DiscordError("application_id_required");
   const identity = await rest.request("GET", "/applications/@me");
@@ -166,7 +167,7 @@ async function registerCommands(config, rest, { apply = false, backupRoot = path
 
 function loadDiscordEnvironment() {
   return require("dotenv").config({
-    path: process.env.DISCORD_ENV_FILE || path.join(__dirname, ".env.discord"), quiet: true, debug: false,
+    path: process.env.DISCORD_ENV_FILE || path.join(dataDirectory(), ".env.discord"), quiet: true, debug: false,
   });
 }
 
@@ -236,4 +237,4 @@ if (require.main === module) main().catch((error) => {
 });
 
 module.exports = { loadDiscordConfig, createDiscordTransport, createDiscordDispatcher,
-  createDiscordReminderSender, registerCommands, startDiscord, COMMANDS };
+  createDiscordReminderSender, registerCommands, startDiscord, COMMANDS, main };

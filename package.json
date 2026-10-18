@@ -1,12 +1,13 @@
 {
   "name": "codex-tg-bot",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "start:discord": "node discord.js",
     "build:release": "node scripts/build-release.js",
+    "build:executable": "node scripts/build-executable.js",
     "test": "node --test"
   },
   "keywords": [],

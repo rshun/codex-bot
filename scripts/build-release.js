@@ -4,9 +4,10 @@ const crypto = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
-const APP_FILES = ["index.js", "discord.js", "discord-client.js", "codex-runner.js",
+const APP_FILES = ["bot.js", "runtime-paths.js", "index.js", "discord.js", "discord-client.js", "codex-runner.js",
   "session-store.js", "usage.js", "quota.js", "reminders.js", "semantic-reminders.js", "reminder-response.schema.json", "china-calendar.js", "china-calendar.json", "package.json", "package-lock.json",
-  ".env.example", ".env.discord.example", "README.md", "SEMANTIC-REMINDERS.md", "HOLIDAY-CALENDAR.md", "UPGRADE-v1.1.0.md", "UPGRADE-v1.2.0.md", "UPGRADE-v1.3.0.md", "UPGRADE-v1.4.0.md", "UPGRADE-v1.5.0.md", "UPGRADE-v1.6.0.md"];
+  ".env.example", ".env.discord.example", "README.md", "SEMANTIC-REMINDERS.md", "HOLIDAY-CALENDAR.md", "UPGRADE-v1.6.0.md", "UPGRADE-v1.7.0.md", "deploy/EXECUTABLE.md",
+  "deploy/upgrade-v1.6.0.sh", "deploy/UPGRADE-SCRIPT.md"];
 const DEPENDENCIES = ["dotenv", "node-telegram-bot-api"];
 const hash = (content) => crypto.createHash("sha256").update(content).digest("hex");
 

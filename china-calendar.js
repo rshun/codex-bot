@@ -1,5 +1,5 @@
 const fs = require("node:fs");
-const path = require("node:path");
+const { defaultCalendarFile, readAsset } = require("./runtime-paths");
 const DAY = 86400000;
 const OFFSET = 8 * 3600000;
 
@@ -10,11 +10,13 @@ class CalendarError extends Error {
 function beijingDay(now) { return new Date(now + OFFSET).toISOString().slice(0, 10); }
 
 class ChinaCalendar {
-  constructor(filename = path.join(__dirname, "china-calendar.json")) {
+  constructor(filename = defaultCalendarFile()) {
     this.years = new Map();
     try {
-      if (fs.statSync(filename).size > 1024 * 1024) throw new Error();
-      const data = JSON.parse(fs.readFileSync(filename, "utf8"));
+      if (filename && fs.statSync(filename).size > 1024 * 1024) throw new Error();
+      const content = filename ? fs.readFileSync(filename) : readAsset("china-calendar.json");
+      if (content.length > 1024 * 1024) throw new Error();
+      const data = JSON.parse(content.toString("utf8"));
       if (data?.version !== 1 || !data.years || Array.isArray(data.years) || typeof data.years !== "object" ||
           !Object.keys(data.years).length) throw new Error();
       for (const [year, entry] of Object.entries(data.years)) {
