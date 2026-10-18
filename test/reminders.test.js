@@ -191,6 +191,108 @@ test("content cancellation refuses in-flight messages and state failures leave t
   assert.equal(app.scheduler.items[0].status, "pending");
 });
 
+test("natural time edits reuse the creation grammar and require a complete explicit request", () => {
+  const cases = [
+    ["把喝水提醒改成每天晚上10点", "喝水", "daily 22:00"],
+    ["请帮我将喝水的提醒调整为明天早上八点半。", "喝水", "2026-10-19 08:30"],
+    ["把提醒 ABCDEF12 改成2026-11-1 23:30", "abcdef12", "2026-11-01 23:30"],
+    ["将ABCDEF12提醒改为后天 09:30", "abcdef12", "2026-10-20 09:30"],
+    ["把喝水提醒修改为每天上午十点一刻", "喝水", "daily 10:15"],
+  ];
+  for (const [input, query, schedule] of cases) {
+    assert.deepEqual(parseNaturalReminder(input, start), { command: "reschedule", argument: { query, schedule } }, input);
+  }
+  for (const input of ["把喝水提醒改成晚上10点", "把喝水提醒改成每天9点", "把所有提醒改成每天晚上10点",
+    "把喝水提醒改成每周一晚上10点", "把喝水提醒改成2026年2月30日 09:00", "把喝水提醒改成每天晚上10点可以吗",
+    "把喝水提醒改成每天晚上10点？", "把喝水提醒改成每天晚上10点，然后把吃饭提醒改成每天中午12点"]) {
+    assert.match(parseNaturalReminder(input, start).error, /未修改提醒/, input);
+  }
+  for (const input of ["不要把喝水提醒改成每天晚上10点", "怎么把喝水提醒改成每天晚上10点", "“把喝水提醒改成每天晚上10点”",
+    "/codex 把喝水提醒改成每天晚上10点"]) assert.equal(parseNaturalReminder(input, start), null, input);
+});
+
+test("editing a daily reminder keeps its ID, contents and history, persists and skips the old time", async () => {
+  const app = fixture();
+  app.at("2026-10-17 08:00");
+  app.scheduler.add("daily 09:00 喝水");
+  app.at("2026-10-17 09:00"); await app.scheduler.tick();
+  app.at("2026-10-18 08:00");
+  const original = { ...app.scheduler.items[0] };
+  const intent = parseNaturalReminder("把喝水提醒改成每天晚上10点", app.options.now());
+  const result = app.scheduler.command(intent.command, intent.argument);
+  assert.match(result, /已修改定时消息/); assert.match(result, /原计划：每天 09:00/); assert.match(result, /新计划：每天 22:00/);
+  const restored = new ReminderScheduler(app.options);
+  for (const key of ["id", "text", "createdAt", "lastAttempt", "lastResult"]) assert.equal(restored.items[0][key], original[key], key);
+  assert.equal(restored.items[0].time, "22:00");
+  app.at("2026-10-18 09:00"); await restored.tick(); assert.equal(app.sent.length, 1);
+  app.at("2026-10-18 22:00"); await restored.tick(); await restored.tick(); assert.equal(app.sent.length, 2);
+  assert.equal(app.sent[1][0], "42");
+  assert.match(restored.command("reschedule", { query: "喝水", schedule: "daily 07:00" }), /2026-10-19 07:00/);
+});
+
+test("edits convert pending once/daily schedules while invalid times and historical tasks remain unchanged", async () => {
+  const app = fixture();
+  app.scheduler.add("2026-10-18 09:00 喝水");
+  const id = app.scheduler.items[0].id;
+  assert.match(app.scheduler.command("reschedule", { query: id, schedule: "daily 22:00" }), /已修改/);
+  assert.equal(new ReminderScheduler(app.options).items[0].kind, "daily");
+  const before = fs.readFileSync(app.options.filename, "utf8");
+  for (const schedule of ["2026-10-18 07:59", "2026-02-30 09:00", "daily 25:00"]) {
+    assert.match(app.scheduler.command("reschedule", { query: id, schedule }), /未修改提醒/);
+    assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  }
+  assert.match(app.scheduler.command("reschedule", { query: ".*", schedule: "daily 20:00" }), /未找到匹配/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  assert.match(app.scheduler.command("reschedule", { query: id, schedule: "2026-10-18 10:00" }), /已修改/);
+  const restored = new ReminderScheduler(app.options);
+  assert.equal(restored.items[0].kind, "once"); assert.equal(restored.items[0].time, null);
+  app.at("2026-10-18 10:00"); await restored.tick();
+  const sentState = fs.readFileSync(app.options.filename, "utf8");
+  assert.match(restored.command("reschedule", { query: id, schedule: "daily 22:00" }), /已经结束或取消/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), sentState);
+  restored.add("daily 21:00 喝水"); const cancelledId = restored.items[1].id; restored.cancel(cancelledId);
+  assert.match(restored.command("reschedule", { query: cancelledId, schedule: "daily 22:00" }), /已经结束或取消/);
+  assert.match(restored.command("reschedule", { query: "喝水", schedule: "daily 22:00" }), /未找到匹配/);
+});
+
+test("ambiguous edits show active candidates without changing state and a natural ID selects only one", () => {
+  const app = fixture();
+  app.scheduler.add("daily 09:00 喝水"); app.scheduler.add("daily 21:00 运动后喝水");
+  const before = fs.readFileSync(app.options.filename, "utf8");
+  const result = app.scheduler.command("reschedule", { query: "喝水", schedule: "daily 22:00" });
+  assert.match(result, /匹配到 2 个/); assert.match(result, /未修改任何任务/); assert.match(result, /改成每天 22:00/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  for (const task of app.scheduler.items) assert.ok(result.includes(task.id));
+  const intent = parseNaturalReminder(`把提醒 ${app.scheduler.items[1].id} 改成每天 22:00`, app.options.now());
+  assert.match(app.scheduler.command(intent.command, intent.argument), /已修改/);
+  assert.equal(app.scheduler.items[0].time, "09:00"); assert.equal(app.scheduler.items[1].time, "22:00");
+  for (let i = 0; i < 19; i++) app.scheduler.add(`daily 21:00 喝水 ${i}`);
+  const many = fs.readFileSync(app.options.filename, "utf8");
+  assert.match(app.scheduler.command("reschedule", { query: "喝水", schedule: "daily 23:00" }), /只显示前 20 条/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), many);
+});
+
+test("edits cannot change an in-flight message and tick rereads another edited task before sending", async () => {
+  let complete;
+  const app = fixture({ send: (user, text) => { app.sent.push([user, text]); return app.sent.length === 1 ? new Promise(resolve => { complete = resolve; }) : Promise.resolve(); } });
+  app.scheduler.add("daily 09:00 第一条"); app.scheduler.add("daily 09:00 喝水");
+  app.at("2026-10-18 09:00"); const ticking = app.scheduler.tick();
+  const first = { ...app.scheduler.items[0] };
+  assert.match(app.scheduler.command("reschedule", { query: first.id, schedule: "daily 10:00" }), /已经开始发送/);
+  assert.deepEqual(app.scheduler.items[0], first);
+  assert.match(app.scheduler.command("reschedule", { query: "喝水", schedule: "daily 10:00" }), /已修改/);
+  complete(); await ticking; assert.equal(app.sent.length, 1);
+  app.at("2026-10-18 10:00"); await app.scheduler.tick(); assert.equal(app.sent.length, 2); assert.match(app.sent[1][1], /喝水/);
+});
+
+test("failed edit persistence never publishes a changed schedule or loses the existing pending task", () => {
+  const app = fixture(); app.scheduler.add("daily 09:00 喝水");
+  const original = { ...app.scheduler.items[0] }, before = fs.readFileSync(app.options.filename, "utf8");
+  app.scheduler.failed = true;
+  assert.match(app.scheduler.command("reschedule", { query: "喝水", schedule: "daily 22:00" }), /保存失败/);
+  assert.deepEqual(app.scheduler.items[0], original); assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+});
+
 test("a one-off reminder persists across restart and only sends privately once after the deadline", async () => {
   const app = fixture();
   assert.match(app.scheduler.add("2026-10-18 09:00 喝水"), /已保存/);
@@ -398,6 +500,17 @@ test("Telegram natural reminders enforce private authorization, work while busy 
   assert.match(replies.at(-1), /请在与 Bot 的私聊/);
   await handler(message("取消喝水提醒", 43, 43));
   assert.equal(replies.at(-1), "未授权。");
+  await handler(message("把喝水提醒改成每天晚上10点", -100));
+  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
+  await handler(message("把喝水提醒改成每天晚上10点", 43, 43));
+  assert.equal(replies.at(-1), "未授权。");
+  await handler(message("把喝水提醒改成每天9点"));
+  assert.match(replies.at(-1), /未修改提醒/);
+  assert.equal(app.scheduler.items[0].time, "21:00");
+  await handler(message("把喝水提醒改成每天晚上10点"));
+  assert.match(replies.at(-1), /已修改定时消息/);
+  assert.equal(app.scheduler.items[0].time, "22:00");
+  assert.equal(prompts.length, 1);
   await handler(message("取消喝水提醒可以吗"));
   assert.match(replies.at(-1), /未取消提醒/);
   assert.equal(app.scheduler.items[0].status, "pending");
@@ -411,6 +524,11 @@ test("Telegram natural reminders enforce private authorization, work while busy 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(prompts.at(-1), "每天晚上9点提醒我喝水");
   finish(); await discussion;
+  const editDiscussion = handler(message("/codex 把喝水提醒改成每天晚上11点"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts.at(-1), "把喝水提醒改成每天晚上11点");
+  finish(); await editDiscussion;
+  assert.equal(app.scheduler.items[0].time, "22:00");
   assert.equal(app.scheduler.items.length, 1);
 });
 
@@ -430,6 +548,12 @@ test("Discord private natural text uses the same grammar and honors disabled pri
   await dispatch("MESSAGE_CREATE", { ...message, id: "623456789012345678" });
   assert.equal(app.scheduler.items.length, 1);
   assert.equal(app.scheduler.items[0].time, "21:00");
+  await dispatch("MESSAGE_CREATE", { ...message, id: "1123456789012345678", guild_id: APP, content: "把喝水提醒改成每天晚上10点" });
+  assert.match(replies.at(-1), /私聊/);
+  assert.equal(app.scheduler.items[0].time, "21:00");
+  await dispatch("MESSAGE_CREATE", { ...message, id: "1223456789012345678", content: "把喝水提醒改成每天晚上10点" });
+  assert.match(replies.at(-1), /已修改定时消息/);
+  assert.equal(new ReminderScheduler(app.options).items[0].time, "22:00");
   app.scheduler.enabled = false;
   await dispatch("MESSAGE_CREATE", { ...message, id: "723456789012345678" });
   assert.match(replies.at(-1), /私聊发送已关闭/);

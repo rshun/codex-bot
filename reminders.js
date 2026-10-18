@@ -15,6 +15,7 @@ const HELP = [
   "/reminders — 查看任务及最近发送结果",
   "/cancelreminder 任务ID — 取消待发任务",
   "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
+  "修改时间：把喝水提醒改成每天晚上10点、把提醒 任务ID 改成明天 08:30",
   "到时发送保存的文字，不调用 Codex。Bot 需保持运行。",
 ].join("\n");
 const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消" };
@@ -56,6 +57,19 @@ function parseNaturalReminder(text, now = Date.now()) {
   if (/^(?:(?:查看|查询|列出|看看)(?:一下)?\s*(?:我的\s*)?(?:(?:全部|所有)\s*)?(?:定时)?提醒(?:列表)?|我有哪些提醒|提醒列表)$/.test(management)) {
     return { command: "reminders", argument: "" };
   }
+  const changeId = management.match(/^(?:把|将)\s*(?:我的)?\s*提醒\s*([a-f0-9]{8})\s*(?:改成|改为|修改为|调整为)\s*(.+)$/i);
+  const changeText = management.match(/^(?:把|将)\s*(?:我的)?\s*(.*?)\s*(?:的)?提醒\s*(?:改成|改为|修改为|调整为)\s*(.+)$/);
+  const change = changeId || changeText;
+  if (change) {
+    const query = change[1].trim();
+    const schedule = parseNaturalTime(change[2].trim(), now);
+    if (query && query.length <= 1000 && !/^(?:全部|所有)(?:的)?$/.test(query) && !/[?？\r\n]|提醒/.test(query) && schedule) {
+      return { command: "reschedule", argument: { query: ID.test(query.toLowerCase()) ? query.toLowerCase() : query, schedule } };
+    }
+  }
+  if (/^(?:把|将)[\s\S]*提醒/.test(management)) {
+    return { error: "未修改提醒：请说“把喝水提醒改成每天晚上10点”或“把提醒 任务ID 改成明天 08:30”。请明确日期或每天及时间，一次只修改一个任务，均按北京时间。" };
+  }
   const cancelId = management.match(/^(?:取消|撤销)\s*(?:我的)?\s*提醒\s*([a-f0-9]{8})$/i);
   if (cancelId) return { command: "cancelreminder", argument: cancelId[1].toLowerCase() };
   const cancelText = management.match(/^(?:取消|撤销)\s*(?:我的)?\s*(.*?)\s*(?:的)?提醒$/);
@@ -74,39 +88,44 @@ function parseNaturalReminder(text, now = Date.now()) {
   const invalid = { error: "未创建提醒：请明确日期或每天、上午/下午及时间，例如“每天晚上9点提醒我喝水”或“明天 08:30 提醒我出门”。目前支持每天、今天、明天、后天及具体日期，均为北京时间。" };
   if (/[?？]\s*$|(?:可以吗|能行吗|行不行|好不好|对吗|怎么设置|如何设置|是什么意思|如何实现|怎么实现)[。！!]?\s*$/.test(request)) return invalid;
   const separator = request.indexOf("提醒我");
-  let when = request.slice(0, separator).trim().replace(/[，,：:]$/, "").trim();
+  const when = request.slice(0, separator).trim().replace(/[，,：:]$/, "").trim();
   const content = request.slice(separator + 3).trim();
   if (!content || content.includes("提醒我")) return invalid;
+  const schedule = parseNaturalTime(when, now);
+  return schedule ? { argument: `${schedule} ${content}` } : invalid;
+}
+
+function parseNaturalTime(when, now) {
   when = when.replace(/^今晚/, "今天晚上").replace(/^明早/, "明天早上").replace(/^每日/, "每天");
   const schedule = when.match(/^(每天|今天|明天|后天|\d{4}年\d{1,2}月\d{1,2}日)\s*(?:的)?(.+)$/) ||
     when.match(/^(\d{4}-\d{1,2}-\d{1,2})(?:\s+|(?=凌晨|早上|上午|中午|下午|晚上))(.+)$/);
-  if (!schedule) return invalid;
+  if (!schedule) return null;
   const clock = schedule[2].replace(/\s/g, "").match(/^(凌晨|早上|上午|中午|下午|晚上)?(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:[:：](\d{2})|[点时](?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?)$/);
-  if (!clock) return invalid;
+  if (!clock) return null;
   let hour = chineseNumber(clock[2]);
   const minute = clock[3] !== undefined ? Number(clock[3]) : clock[4] ? { 半: 30, 一刻: 15, 三刻: 45 }[clock[4]]
     : clock[5] !== undefined ? chineseNumber(clock[5]) : 0;
   const period = clock[1];
-  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return invalid;
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return null;
   if (period) {
-    if (hour < 1 || hour > 12) return invalid;
+    if (hour < 1 || hour > 12) return null;
     if (period === "凌晨") hour = hour === 12 ? 0 : hour;
     if (period === "中午") hour = hour === 1 ? 13 : hour;
     if (period === "下午" || period === "晚上") hour += 12;
     // Reject conflicting periods, especially “晚上12点” with an unclear calendar date.
     const ranges = { 凌晨: [0, 5], 早上: [6, 11], 上午: [6, 11], 中午: [11, 13], 下午: [13, 18], 晚上: [18, 23] };
-    if (hour < ranges[period][0] || hour > ranges[period][1]) return invalid;
+    if (hour < ranges[period][0] || hour > ranges[period][1]) return null;
   } else if (hour > 0 && hour <= 12 && clock[3] === undefined) {
-    return invalid; // “9点” needs a period; “09:00” explicitly uses the 24-hour clock.
+    return null; // “9点” needs a period; “09:00” explicitly uses the 24-hour clock.
   }
-  if (hour < 0 || hour > 23) return invalid;
+  if (hour < 0 || hour > 23) return null;
   const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-  if (schedule[1] === "每天") return { argument: `daily ${time} ${content}` };
+  if (schedule[1] === "每天") return `daily ${time}`;
   const relative = { 今天: 0, 明天: 1, 后天: 2 };
   const date = Object.hasOwn(relative, schedule[1]) ? formatTime(now + relative[schedule[1]] * DAY).slice(0, 10)
     : schedule[1].match(/\d+/g).map((part, index) => index ? part.padStart(2, "0") : part).join("-");
-  if (!Number.isFinite(parseTime(`${date} ${time}`))) return invalid;
-  return { argument: `${date} ${time} ${content}` };
+  if (!Number.isFinite(parseTime(`${date} ${time}`))) return null;
+  return `${date} ${time}`;
 }
 
 function validISO(value) {
@@ -228,11 +247,40 @@ class ReminderScheduler {
     return `${this.cancel(matches[0].id)}\n内容：${matches[0].text}`;
   }
 
+  reschedule(argument) {
+    if (!argument || typeof argument.query !== "string" || !argument.query.trim() || argument.query.length > 1000 ||
+        typeof argument.schedule !== "string") return "未修改提醒，请提供明确的提醒内容或任务 ID 及新时间。";
+    const { schedule } = argument;
+    const query = argument.query.trim();
+    const daily = schedule.match(/^daily ((?:[01]\d|2[0-3]):[0-5]\d)$/);
+    const now = this.now();
+    const next = daily ? nextDaily(daily[1], now) : parseTime(schedule);
+    if (!Number.isFinite(next) || next <= now) return "未修改提醒：时间无效或已经过去，请使用未来的北京时间。";
+    const byId = ID.test(query);
+    const matches = this.items.filter((item) => byId ? item.id === query
+      : ["pending", "sending"].includes(item.status) && item.text.toLowerCase().includes(query.toLowerCase()));
+    if (!matches.length) return "未找到匹配的提醒，未修改任何任务。请说“查看我的提醒”核对内容或任务 ID。";
+    if (matches.length > 1) {
+      const target = daily ? `每天 ${daily[1]}` : schedule;
+      const lines = matches.slice(0, 20).map((item) =>
+        `${item.id} · ${LABELS[item.status]} · ${item.kind === "daily" ? `每天 ${item.time}；下次 ` : ""}${formatTime(Date.parse(item.nextAt))}（北京时间）\n${item.text}`);
+      return [`匹配到 ${matches.length} 个提醒，未修改任何任务。请发送“把提醒 任务ID 改成${target}”明确选择：`,
+        ...lines, ...(matches.length > 20 ? ["这里只显示前 20 条，请用更具体的提醒内容缩小范围。"] : [])].join("\n");
+    }
+    const task = matches[0];
+    if (task.status === "sending") return "该提醒已经开始发送，暂时不能修改；请等本次完成后再修改后续时间。";
+    if (task.status !== "pending") return "该提醒已经结束或取消，不能修改；请新建提醒。";
+    const previous = `${task.kind === "daily" ? `每天 ${task.time}；下次 ` : ""}${formatTime(Date.parse(task.nextAt))}`;
+    this.update(task.id, { kind: daily ? "daily" : "once", time: daily ? daily[1] : null, nextAt: new Date(next).toISOString() });
+    return `已修改定时消息：${task.id}\n原计划：${previous}（北京时间）\n新计划：${daily ? `每天 ${daily[1]}；下次 ` : ""}${formatTime(next)}（北京时间）\n内容：${task.text}`;
+  }
+
   command(name, argument) {
     try {
       if (name === "remind") return this.add(argument);
       if (name === "reminders") return this.list();
       if (name === "cancelmatching") return this.cancelMatching(argument);
+      if (name === "reschedule") return this.reschedule(argument);
       return this.cancel(argument);
     } catch { return "定时任务保存失败，调度已暂停；请检查状态目录权限并重启 Bot。"; }
   }
