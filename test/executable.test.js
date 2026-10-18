@@ -147,6 +147,11 @@ test("embedded schema is materialized once, content-checked and never overwrites
   fs.writeFileSync(schema, "conflicting data");
   assert.throws(() => runtime.schemaFile(), /schema validation failed/);
   assert.equal(fs.readFileSync(schema, "utf8"), "conflicting data");
+  const externalState = fixture(), before = snapshot(directory);
+  const externalSchema = runtime.schemaFile(externalState);
+  assert.ok(externalSchema.startsWith(path.join(externalState, "runtime-assets") + path.sep));
+  assert.deepEqual(snapshot(directory), before);
+  assert.equal(runtime.schemaFile(externalState), externalSchema);
 });
 
 test("executable archive keeps Linux mode 0755 on Windows and does not include unlisted private files", async () => {

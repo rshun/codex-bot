@@ -33,7 +33,7 @@ BIN=/home/codex/codex-tg-bot/releases/实际版本目录/codex-bot
 
 默认状态路径为配置目录下 `.bot-state/sessions.json`、`.bot-state/discord-sessions.json`，对应提醒文件为同目录 `telegram-reminders.json`、`discord-reminders.json`。**迁移时必须核实旧实例实际使用的路径，并沿用原 `SESSION_FILE`、`REMINDER_FILE`，不能仅凭默认值推断。** 特别是旧 Node 发布包可能默认把状态写在旧版本目录下。
 
-内置日历保留现有覆盖年份；配置 `HOLIDAY_CALENDAR_FILE` 时优先读取原自定义日历。无该配置时不需要外置日历文件。提醒 JSON Schema 已内置，在第一次模型对话时才写入配置目录的 `.bot-state/runtime-assets/<内容哈希>/`，供外部 Codex CLI 读取。这不改变会话或提醒格式，不会覆盖已有不同内容的 schema；该目录需要当前服务用户可写。只读检查不会生成这些文件。
+内置日历保留现有覆盖年份；配置 `HOLIDAY_CALENDAR_FILE` 时优先读取原自定义日历。无该配置时不需要外置日历文件。提醒 JSON Schema 已内置，在第一次模型对话时才写入会话状态文件所在目录的 `runtime-assets/<内容哈希>/`，供外部 Codex CLI 读取。默认位于配置目录的 `.bot-state/`，自定义状态目录也可继续使用，配置目录本身可以只读。这不改变会话或提醒格式，不会覆盖已有不同内容的 schema；资产目录需要当前服务用户可写。两个进程同时首次使用时原子发布 schema，保留小型公开临时资产，不自动删除。只读检查不会生成这些文件。
 
 Discord 命令注册继续支持预览和显式应用；日常升级不必重新注册：
 
@@ -155,7 +155,7 @@ systemctl is-active codex-discord-bot.service
 
 工作流为 [build-executable.yml](../.github/workflows/build-executable.yml)。推送 `codex/debian-executable` 分支会自动构建；版本标签推送和手动 `workflow_dispatch` 也支持。只有当该工作流已经进入默认分支后，GitHub 才会显示相应手动运行入口。工作流只生成 Actions artifacts，不自动创建 GitHub Release 或部署服务器。
 
-两个原生 runner 分别构建 `linux-x64`、`linux-arm64`，临时安装锁定的现有运行依赖及隔离构建工具，运行完整回归，验证归档校验值，再运行提取后的程序。另用 Debian 12 容器检查两个平台入口：镜像仅安装 Node 所需基础 C++ 库，不含 Node/npm；校验时关闭网络并使用只读系统和合成的旧配置、会话、v2 提醒。检查前后对比数据字节，不接入真实 Bot 或模型。所有安装只发生在 GitHub 临时 runner/验证镜像中。
+两个原生 runner 分别构建 `linux-x64`、`linux-arm64`，临时安装锁定的现有运行依赖及隔离构建工具，运行完整回归，验证归档校验值，再运行提取后的程序。另用固定镜像摘要的 Debian 12 容器检查两个平台入口：镜像含系统基础库，不含 Node/npm；校验时关闭网络、使用只读系统，并以测试数据所有者的 UID/GID 读取合成的旧配置、会话、v2 提醒。检查前后对比数据字节，不接入真实 Bot 或模型。所有安装只发生在 GitHub 临时 runner 中。
 
 在仓库 Actions 的 **Build Debian executables** 成功运行页面，下载 `codex-bot-linux-x64` 或 `codex-bot-linux-arm64` artifact。GitHub 下载的是 ZIP，解开后有运行包 `.tar.gz` 和 `SHA256SUMS`；再按本文校验和部署。Artifacts 保留 30 天，长期下载入口需后续正式发布到 Release。
 

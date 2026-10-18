@@ -71,6 +71,7 @@ jobs:
           node scripts/smoke-debian.js prepare
           docker build --tag codex-bot-debian-smoke --file deploy/executable/Dockerfile.smoke deploy/executable
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
             --mount "type=bind,src=$binary_dir,dst=/package,readonly" \
             --mount "type=bind,src=$GITHUB_WORKSPACE/.test-artifacts/debian-smoke,dst=/fixture" \
             codex-bot-debian-smoke /bin/sh -eu -c '

@@ -206,7 +206,8 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
         });
       } catch { logger.warn("Message reaction failed."); }
       const turn = reminders ? prepareTurn({ scheduler: reminders, text: prompt, privateChat,
-        allowActions: name !== "codex", receipt: session.reminderReceipt || "", redact }) : null;
+        allowActions: name !== "codex", receipt: session.reminderReceipt || "", redact,
+        schemaDirectory: path.dirname(config.sessionFile) }) : null;
       const result = await runner({
         bin: config.bin, workdir: config.workdir, env: { ...config.env, CODEX_HOME: config.codexHome },
         prompt: turn ? turn.prompt : prompt, threadId: session.threadId, model: selectedModel, timeoutMs: config.timeoutMs,

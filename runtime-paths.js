@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const sea = require("node:sea");
 
 let directory;
@@ -22,12 +22,15 @@ function readAsset(name) {
 
 // Codex is a separate process and needs a real --output-schema file. Only this
 // public, embedded asset is materialized; configuration and user state stay external.
-function schemaFile() {
+function schemaFile(stateDirectory = path.join(dataDirectory(), ".bot-state")) {
   if (!sea.isSea()) return path.join(__dirname, "reminder-response.schema.json");
   const content = readAsset("reminder-response.schema.json");
   const digest = createHash("sha256").update(content).digest("hex");
-  let parent = dataDirectory();
-  for (const part of [".bot-state", "runtime-assets", digest]) {
+  // Use the existing state location, so a read-only config directory remains
+  // usable when SESSION_FILE/REMINDER_FILE point at a separate writable volume.
+  fs.mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+  let parent = fs.realpathSync(stateDirectory);
+  for (const part of ["runtime-assets", digest]) {
     parent = path.join(parent, part);
     try { fs.mkdirSync(parent, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; }
     const stat = fs.lstatSync(parent);
@@ -37,8 +40,15 @@ function schemaFile() {
     }
   }
   const filename = path.join(parent, "reminder-response.schema.json");
-  try { fs.writeFileSync(filename, content, { flag: "wx", mode: 0o600 }); }
-  catch (error) { if (error.code !== "EEXIST") throw error; }
+  try { fs.lstatSync(filename); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    const temporary = path.join(parent, `.schema-${randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, content, { flag: "wx", mode: 0o600 });
+    // Hard-link publication is atomic and cannot replace another process's file.
+    // Retain the small public temporary asset instead of deleting files.
+    try { fs.linkSync(temporary, filename); } catch (error) { if (error.code !== "EEXIST") throw error; }
+  }
   const stat = fs.lstatSync(filename);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== content.length ||
       (process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o022))) ||
