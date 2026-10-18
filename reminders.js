@@ -11,6 +11,7 @@ const HELP = [
   "定时消息（北京时间，仅私聊）：",
   "/remind YYYY-MM-DD HH:mm 内容 — 指定日期发送一次",
   "/remind daily HH:mm 内容 — 每天发送",
+  "也可直接说：每天晚上9点提醒我喝水、明天早上8点半提醒我吃早餐",
   "/reminders — 查看任务及最近发送结果",
   "/cancelreminder 任务ID — 取消待发任务",
   "到时发送保存的文字，不调用 Codex。Bot 需保持运行。",
@@ -35,6 +36,59 @@ function nextDaily(time, now) {
   const day = formatTime(now).slice(0, 10);
   const candidate = parseTime(`${day} ${time}`);
   return candidate > now ? candidate : candidate + DAY;
+}
+
+function chineseNumber(value) {
+  if (/^\d{1,2}$/.test(value)) return Number(value);
+  const digits = "零一二三四五六七八九";
+  value = value.replace(/两/g, "二").replace(/〇/g, "零");
+  if (/^[零一二三四五六七八九]$/.test(value)) return digits.indexOf(value);
+  const tens = value.match(/^([一二三四五六七八九])?十([一二三四五六七八九])?$/);
+  return tens ? (tens[1] ? digits.indexOf(tens[1]) : 1) * 10 + (tens[2] ? digits.indexOf(tens[2]) : 0) : NaN;
+}
+
+// A bounded grammar: only a complete, explicit reminder request bypasses ordinary chat.
+// Keep reminder content untouched; normalize only the time expression.
+function parseNaturalReminder(text, now = Date.now()) {
+  const request = text.trim().replace(/^(?:请帮我|帮我|请)\s*/, "");
+  if (!/^(?:每天|每日|今天|明天|后天|今晚|明早|\d{4}[-年]|每周|每月|下周|周[一二三四五六日天]|早上|上午|中午|下午|晚上|凌晨)/.test(request) ||
+      !request.includes("提醒我")) return null;
+  const invalid = { error: "未创建提醒：请明确日期或每天、上午/下午及时间，例如“每天晚上9点提醒我喝水”或“明天 08:30 提醒我出门”。目前支持每天、今天、明天、后天及具体日期，均为北京时间。" };
+  if (/[?？]\s*$|(?:可以吗|能行吗|行不行|好不好|对吗|怎么设置|如何设置|是什么意思|如何实现|怎么实现)[。！!]?\s*$/.test(request)) return invalid;
+  const separator = request.indexOf("提醒我");
+  let when = request.slice(0, separator).trim().replace(/[，,：:]$/, "").trim();
+  const content = request.slice(separator + 3).trim();
+  if (!content || content.includes("提醒我")) return invalid;
+  when = when.replace(/^今晚/, "今天晚上").replace(/^明早/, "明天早上").replace(/^每日/, "每天");
+  const schedule = when.match(/^(每天|今天|明天|后天|\d{4}年\d{1,2}月\d{1,2}日)\s*(?:的)?(.+)$/) ||
+    when.match(/^(\d{4}-\d{1,2}-\d{1,2})(?:\s+|(?=凌晨|早上|上午|中午|下午|晚上))(.+)$/);
+  if (!schedule) return invalid;
+  const clock = schedule[2].replace(/\s/g, "").match(/^(凌晨|早上|上午|中午|下午|晚上)?(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})(?:[:：](\d{2})|[点时](?:(半|一刻|三刻)|(\d{1,2}|[零〇一二两三四五六七八九十]{1,3})分?)?)$/);
+  if (!clock) return invalid;
+  let hour = chineseNumber(clock[2]);
+  const minute = clock[3] !== undefined ? Number(clock[3]) : clock[4] ? { 半: 30, 一刻: 15, 三刻: 45 }[clock[4]]
+    : clock[5] !== undefined ? chineseNumber(clock[5]) : 0;
+  const period = clock[1];
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute < 0 || minute > 59) return invalid;
+  if (period) {
+    if (hour < 1 || hour > 12) return invalid;
+    if (period === "凌晨") hour = hour === 12 ? 0 : hour;
+    if (period === "中午") hour = hour === 1 ? 13 : hour;
+    if (period === "下午" || period === "晚上") hour += 12;
+    // Reject conflicting periods, especially “晚上12点” with an unclear calendar date.
+    const ranges = { 凌晨: [0, 5], 早上: [6, 11], 上午: [6, 11], 中午: [11, 13], 下午: [13, 18], 晚上: [18, 23] };
+    if (hour < ranges[period][0] || hour > ranges[period][1]) return invalid;
+  } else if (hour > 0 && hour <= 12 && clock[3] === undefined) {
+    return invalid; // “9点” needs a period; “09:00” explicitly uses the 24-hour clock.
+  }
+  if (hour < 0 || hour > 23) return invalid;
+  const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  if (schedule[1] === "每天") return { argument: `daily ${time} ${content}` };
+  const relative = { 今天: 0, 明天: 1, 后天: 2 };
+  const date = Object.hasOwn(relative, schedule[1]) ? formatTime(now + relative[schedule[1]] * DAY).slice(0, 10)
+    : schedule[1].match(/\d+/g).map((part, index) => index ? part.padStart(2, "0") : part).join("-");
+  if (!Number.isFinite(parseTime(`${date} ${time}`))) return invalid;
+  return { argument: `${date} ${time} ${content}` };
 }
 
 function validISO(value) {
@@ -194,4 +248,4 @@ class ReminderScheduler {
   }
 }
 
-module.exports = { ReminderScheduler, ReminderError, parseTime, nextDaily, formatTime, HELP };
+module.exports = { ReminderScheduler, ReminderError, parseTime, nextDaily, formatTime, parseNaturalReminder, HELP };

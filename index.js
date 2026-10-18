@@ -4,7 +4,7 @@ const { SessionStore, MODEL_NAME } = require("./session-store");
 const { runCodex } = require("./codex-runner");
 const { formatUsage } = require("./usage");
 const { queryQuota, formatQuota } = require("./quota");
-const { ReminderScheduler } = require("./reminders");
+const { ReminderScheduler, parseNaturalReminder } = require("./reminders");
 
 function loadConfig(env, { platform = "telegram" } = {}) {
   if (!["telegram", "discord"].includes(platform)) throw new Error("无效的平台配置。");
@@ -93,6 +93,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/quota — 查询账号额度和重置时间",
     "/remind YYYY-MM-DD HH:mm 内容 — 指定时间私聊提醒（北京时间）",
     "/remind daily HH:mm 内容 — 每天私聊提醒",
+    "也可直接说：每天晚上9点提醒我喝水（北京时间，仅私聊）",
     "/reminders — 查看定时消息（仅私聊）",
     "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
     `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
@@ -121,10 +122,14 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     if (name === "id") return reply(msg, `你的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID：${msg.from.id}`);
     if (String(msg.from.id) !== config.allowedUserId) return reply(msg, "未授权。");
 
-    if (["remind", "reminders", "cancelreminder"].includes(name)) {
+    const natural = !msg.text.trimStart().startsWith("/")
+      ? parseNaturalReminder(msg.text, reminders ? reminders.now() : Date.now()) : null;
+    if (["remind", "reminders", "cancelreminder"].includes(name) || natural) {
       const privateChat = config.platform === "discord" ? msg.chat.type === "private"
         : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
       if (!privateChat) return reply(msg, "定时消息请在与 Bot 的私聊中设置和管理。");
+      if (natural?.error) return reply(msg, natural.error);
+      if (natural) return reply(msg, reminders ? reminders.command("remind", natural.argument) : "定时消息功能尚未启用。");
       return reply(msg, reminders ? reminders.command(name, argument) : "定时消息功能尚未启用。");
     }
 

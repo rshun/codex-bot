@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { ReminderScheduler, parseTime, nextDaily, formatTime } = require("../reminders");
+const { ReminderScheduler, parseTime, nextDaily, formatTime, parseNaturalReminder } = require("../reminders");
 const { loadConfig, createRedactor, createMessageHandler } = require("../index");
 const { SessionStore } = require("../session-store");
 const { loadDiscordConfig, createDiscordTransport, createDiscordDispatcher, createDiscordReminderSender } = require("../discord");
@@ -35,6 +35,71 @@ test("reminder parsing validates calendar dates and uses Beijing time independen
   assert.ok(Number.isFinite(parseTime("2028-02-29 10:00")));
   assert.equal(formatTime(nextDaily("08:00", start)), "2026-10-19 08:00");
   assert.equal(formatTime(nextDaily("09:00", start)), "2026-10-18 09:00");
+});
+
+test("natural reminders parse explicit Chinese daily, relative-date and calendar expressions", () => {
+  const cases = [
+    ["每天晚上9点提醒我喝水", "daily 21:00 喝水"],
+    ["请帮我每天晚上九点提醒我喝水", "daily 21:00 喝水"],
+    ["每日早上八点半提醒我吃早餐", "daily 08:30 吃早餐"],
+    ["每天上午十点一刻提醒我休息", "daily 10:15 休息"],
+    ["每天晚上九点三刻提醒我休息", "daily 21:45 休息"],
+    ["每天凌晨十二点提醒我休息", "daily 00:00 休息"],
+    ["每天中午十二点提醒我吃饭", "daily 12:00 吃饭"],
+    ["每天中午一点提醒我休息", "daily 13:00 休息"],
+    ["每天 09:00 提醒我喝水", "daily 09:00 喝水"],
+    ["每天21点提醒我喝水", "daily 21:00 喝水"],
+    ["明天早上8点半提醒我出门", "2026-10-19 08:30 出门"],
+    ["后天下午三点二十五分提醒我开会", "2026-10-20 15:25 开会"],
+    ["今天的下午3点05分，提醒我开会", "2026-10-18 15:05 开会"],
+    ["今晚9点提醒我休息", "2026-10-18 21:00 休息"],
+    ["明早8点提醒我出门", "2026-10-19 08:00 出门"],
+    ["2026年10月19日晚上9点提醒我喝水", "2026-10-19 21:00 喝水"],
+    ["2026-10-19 08：30 提醒我出门", "2026-10-19 08:30 出门"],
+    ["2026-11-1 23:30 提醒我出门", "2026-11-01 23:30 出门"],
+    ["2026-11-12 03:30 提醒我出门", "2026-11-12 03:30 出门"],
+    ["2026-11-1晚上9点提醒我出门", "2026-11-01 21:00 出门"],
+    ["每天晚上9点提醒我第一行\n第二行：不要改内容", "daily 21:00 第一行\n第二行：不要改内容"],
+  ];
+  for (const [input, argument] of cases) assert.deepEqual(parseNaturalReminder(input, start), { argument }, input);
+  assert.deepEqual(parseNaturalReminder("明天早上8点提醒我出门", parseTime("2026-12-31 23:59")),
+    { argument: "2027-01-01 08:00 出门" });
+});
+
+test("ambiguous, contradictory, unsupported and questioning reminders never become schedule arguments", () => {
+  for (const input of ["每天9点提醒我喝水", "明天提醒我喝水", "晚上9点提醒我喝水", "每天晚上12点提醒我休息",
+    "每天早上3点提醒我喝水", "每天下午9点提醒我喝水", "每天上午13点提醒我喝水", "每天25:00提醒我喝水",
+    "每天晚上9点60分提醒我喝水", "每天晚上9点提醒我", "每周一晚上9点提醒我喝水",
+    "2026年2月30日晚上9点提醒我喝水", "每天晚上9点提醒我喝水，可以吗？", "每天晚上9点提醒我喝水可以吗",
+    "每天晚上9点提醒我喝水怎么设置", "每天晚上9点提醒我喝水，明天早上8点提醒我出门",
+    "2026-11-123:30提醒我出门"]) {
+    assert.match(parseNaturalReminder(input, start).error, /未创建提醒/, input);
+  }
+  for (const input of ["你好", "帮我分析提醒功能", "能不能每天晚上9点提醒我喝水", "如何设置每天晚上9点提醒我喝水？",
+    "“每天晚上9点提醒我喝水”", "/codex 每天晚上9点提醒我喝水"]) {
+    assert.equal(parseNaturalReminder(input, start), null, input);
+  }
+});
+
+test("natural reminders reuse persistence, daily rollover, cancellation and private delivery", async () => {
+  const app = fixture();
+  app.at("2026-10-18 22:00");
+  const natural = parseNaturalReminder("每天晚上9点提醒我喝水", app.options.now());
+  assert.match(app.scheduler.command("remind", natural.argument), /2026-10-19 21:00（北京时间）/);
+  const restored = new ReminderScheduler(app.options);
+  assert.equal(restored.items[0].time, "21:00");
+  assert.equal(restored.items[0].text, "喝水");
+  app.at("2026-10-19 21:00");
+  await restored.tick();
+  assert.equal(app.sent.length, 1);
+  assert.equal(app.sent[0][0], "42");
+  assert.match(app.sent[0][1], /喝水/);
+  assert.equal(formatTime(Date.parse(restored.items[0].nextAt)), "2026-10-20 21:00");
+  restored.command("cancelreminder", restored.items[0].id);
+  app.at("2026-10-20 21:00");
+  await restored.tick();
+  assert.equal(app.sent.length, 1);
+  assert.match(app.scheduler.command("remind", parseNaturalReminder("今天早上7点提醒我出门", app.options.now()).argument), /已经过去/);
 });
 
 test("a one-off reminder persists across restart and only sends privately once after the deadline", async () => {
@@ -210,6 +275,60 @@ test("Telegram reminders require the authorized private chat, bypass Codex and c
   assert.equal(runs, 1);
   assert.match(replies.at(-1).text, /待发送/);
   finish(); await running;
+});
+
+test("Telegram natural reminders enforce private authorization, work while busy and leave normal conversation intact", async () => {
+  const app = fixture();
+  const config = loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42", SESSION_FILE: path.join(directory, `sessions-${++number}.json`) });
+  const replies = [], prompts = [];
+  let finish;
+  const handler = createMessageHandler({ config, reminders: app.scheduler, store: new SessionStore(config.sessionFile, config),
+    bot: { sendMessage: async (chat, text) => replies.push(text), _request: async () => {} },
+    runner: ({ prompt }) => { prompts.push(prompt); return new Promise((resolve) => { finish = () => resolve({ ok: true, text: "完成" }); }); } });
+  const message = (text, chat = 42, user = 42) => ({ text, chat: { id: chat }, from: { id: user }, message_id: 1 });
+  await handler(message("每天晚上9点提醒我喝水", 43, 43));
+  assert.equal(replies.at(-1), "未授权。");
+  await handler(message("每天晚上9点提醒我喝水", -100));
+  assert.match(replies.at(-1), /私聊/);
+  await handler(message("每天9点提醒我喝水"));
+  assert.match(replies.at(-1), /未创建提醒/);
+  assert.equal(app.scheduler.items.length, 0);
+  assert.equal(prompts.length, 0);
+  const running = handler(message("普通对话"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await handler(message("每天晚上9点提醒我喝水"));
+  assert.match(replies.at(-1), /已保存定时消息/);
+  assert.match(replies.at(-1), /2026-10-18 21:00（北京时间）/);
+  assert.equal(app.scheduler.items.length, 1);
+  assert.equal(prompts.length, 1);
+  finish(); await running;
+  const discussion = handler(message("/codex 每天晚上9点提醒我喝水"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts.at(-1), "每天晚上9点提醒我喝水");
+  finish(); await discussion;
+  assert.equal(app.scheduler.items.length, 1);
+});
+
+test("Discord private natural text uses the same grammar and honors disabled private sending", async () => {
+  const config = loadDiscordConfig({ DISCORD_BOT_TOKEN: "synthetic_discord_credential", DISCORD_ALLOWED_USER_ID: USER,
+    DISCORD_CHANNEL_IDS: CHANNEL, SESSION_FILE: path.join(directory, `discord-sessions-${++number}.json`) });
+  const app = fixture({ platform: "discord", userId: USER });
+  const replies = [];
+  const handler = createMessageHandler({ config, reminders: app.scheduler, store: new SessionStore(config.sessionFile, config),
+    transport: { reply: async (msg, text) => replies.push(text) }, runner: async () => { throw new Error("Codex must not be called"); } });
+  const dispatch = createDiscordDispatcher({ config, rest: { request: async () => ({}) }, handler });
+  await dispatch("READY", { user: { id: BOT, bot: true }, application: { id: APP } });
+  const message = { id: "523456789012345678", channel_id: CHANNEL, author: { id: USER }, content: "每天晚上9点提醒我喝水" };
+  await dispatch("MESSAGE_CREATE", { ...message, guild_id: APP });
+  assert.equal(app.scheduler.items.length, 0);
+  assert.match(replies.at(-1), /私聊/);
+  await dispatch("MESSAGE_CREATE", { ...message, id: "623456789012345678" });
+  assert.equal(app.scheduler.items.length, 1);
+  assert.equal(app.scheduler.items[0].time, "21:00");
+  app.scheduler.enabled = false;
+  await dispatch("MESSAGE_CREATE", { ...message, id: "723456789012345678" });
+  assert.match(replies.at(-1), /私聊发送已关闭/);
+  assert.equal(app.scheduler.items.length, 1);
 });
 
 test("Discord native reminders are stored without interaction tokens and later sent via a fresh private Bot message", async () => {
