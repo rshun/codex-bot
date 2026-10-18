@@ -1,0 +1,254 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { ReminderScheduler, parseTime, nextDaily, formatTime } = require("../reminders");
+const { loadConfig, createRedactor, createMessageHandler } = require("../index");
+const { SessionStore } = require("../session-store");
+const { loadDiscordConfig, createDiscordTransport, createDiscordDispatcher, createDiscordReminderSender } = require("../discord");
+
+const root = path.join(__dirname, "..", ".test-artifacts");
+fs.mkdirSync(root, { recursive: true });
+const directory = fs.mkdtempSync(path.join(root, "reminders-"));
+let number = 0;
+const USER = "123456789012345678";
+const CHANNEL = "223456789012345678";
+const BOT = "323456789012345678";
+const APP = "423456789012345678";
+const start = parseTime("2026-10-18 08:00");
+
+function fixture(extra = {}) {
+  let clock = start;
+  const sent = [], logs = [];
+  const options = { filename: path.join(directory, `state-${++number}.json`), platform: "telegram", userId: "42",
+    now: () => clock, send: async (...args) => { sent.push(args); }, logger: { error: (value) => logs.push(value) }, ...extra };
+  const scheduler = new ReminderScheduler(options);
+  return { scheduler, options, sent, logs, at: (value) => { clock = typeof value === "string" ? parseTime(value) : value; } };
+}
+
+test("reminder parsing validates calendar dates and uses Beijing time independently of host timezone", () => {
+  assert.equal(new Date(start).toISOString(), "2026-10-18T00:00:00.000Z");
+  assert.equal(formatTime(start), "2026-10-18 08:00");
+  for (const input of ["2026-02-30 10:00", "2026-13-01 10:00", "2026-10-18 24:00", "2026-10-18 08:60", "2026-1-1 8:00"]) {
+    assert.ok(Number.isNaN(parseTime(input)), input);
+  }
+  assert.ok(Number.isFinite(parseTime("2028-02-29 10:00")));
+  assert.equal(formatTime(nextDaily("08:00", start)), "2026-10-19 08:00");
+  assert.equal(formatTime(nextDaily("09:00", start)), "2026-10-18 09:00");
+});
+
+test("a one-off reminder persists across restart and only sends privately once after the deadline", async () => {
+  const app = fixture();
+  assert.match(app.scheduler.add("2026-10-18 09:00 喝水"), /已保存/);
+  const restored = new ReminderScheduler(app.options);
+  await restored.tick();
+  assert.equal(app.sent.length, 0);
+  app.at("2026-10-18 09:00");
+  await restored.tick();
+  assert.equal(app.sent.length, 1);
+  assert.equal(app.sent[0][0], "42");
+  assert.match(app.sent[0][1], /喝水/);
+  await restored.tick();
+  await new ReminderScheduler(app.options).tick();
+  assert.equal(app.sent.length, 1);
+  assert.equal(restored.items[0].status, "sent");
+});
+
+test("overdue daily reminders catch up once and calculate the next future date rather than replaying missed days", async () => {
+  const app = fixture();
+  app.scheduler.add("daily 09:00 站起来活动");
+  app.at("2026-10-22 12:00");
+  await app.scheduler.tick();
+  await app.scheduler.tick();
+  assert.equal(app.sent.length, 1);
+  assert.equal(formatTime(Date.parse(app.scheduler.items[0].nextAt)), "2026-10-23 09:00");
+  app.at("2026-10-23 09:00");
+  await app.scheduler.tick();
+  assert.equal(app.sent.length, 2);
+  assert.equal(app.scheduler.items[0].lastResult, "sent");
+});
+
+test("expired one-off reminders catch up after downtime, while cancellation prevents delivery", async () => {
+  const app = fixture();
+  app.scheduler.add("2026-10-18 09:00 保留提醒");
+  app.scheduler.add("2026-10-18 09:00 取消提醒");
+  const id = app.scheduler.items[1].id;
+  assert.match(app.scheduler.cancel(id), /已取消/);
+  app.at("2026-10-20 09:00");
+  await new ReminderScheduler(app.options).tick();
+  assert.equal(app.sent.length, 1);
+  assert.match(app.sent[0][1], /保留提醒/);
+  assert.match(app.scheduler.cancel("--all"), /用法/);
+});
+
+test("ambiguous network failure is recorded without logging raw errors or automatically retrying", async () => {
+  const app = fixture({ send: async () => { throw new Error("synthetic_private_payload"); } });
+  app.scheduler.add("2026-10-18 09:00 测试");
+  app.at("2026-10-18 09:00");
+  await app.scheduler.tick();
+  const restored = new ReminderScheduler(app.options);
+  assert.equal(restored.items[0].status, "uncertain");
+  let retried = false;
+  restored.send = async () => { retried = true; };
+  await restored.tick();
+  assert.equal(retried, false);
+  assert.match(restored.list(), /发送未确认/);
+  assert.ok(app.logs.every((value) => !value.includes("synthetic_private_payload")));
+});
+
+test("a persisted sending claim recovers as uncertain and never resends that occurrence", async () => {
+  for (const argument of ["2026-10-18 09:00 测试", "daily 09:00 测试"]) {
+    const app = fixture();
+    app.scheduler.add(argument);
+    app.scheduler.update(app.scheduler.items[0].id, { status: "sending", lastAttempt: new Date(start).toISOString() });
+    app.at("2026-10-20 12:00");
+    const restored = new ReminderScheduler(app.options);
+    await restored.tick();
+    assert.equal(app.sent.length, 0);
+    assert.equal(restored.items[0].lastResult, "uncertain");
+    if (restored.items[0].kind === "daily") {
+      assert.equal(restored.items[0].status, "pending");
+      assert.equal(formatTime(Date.parse(restored.items[0].nextAt)), "2026-10-21 09:00");
+    } else assert.equal(restored.items[0].status, "uncertain");
+  }
+});
+
+test("claim write failure prevents sending; post-send write failure preserves the claim and pauses further work", async () => {
+  for (const failAt of [1, 2]) {
+    const app = fixture();
+    app.scheduler.add("2026-10-18 09:00 测试");
+    app.at("2026-10-18 09:00");
+    const persist = app.scheduler.persist.bind(app.scheduler);
+    let writes = 0;
+    app.scheduler.persist = (items) => { if (++writes === failAt) throw new Error("synthetic_private_payload"); persist(items); };
+    await app.scheduler.tick();
+    assert.equal(app.sent.length, failAt === 1 ? 0 : 1);
+    assert.equal(app.scheduler.failed, true);
+    await app.scheduler.tick();
+    assert.equal(app.sent.length, failAt === 1 ? 0 : 1);
+    const disk = JSON.parse(fs.readFileSync(app.options.filename));
+    assert.equal(disk.items[0].status, failAt === 1 ? "pending" : "sending");
+  }
+});
+
+test("overlapping ticks, task creation and cancellation during a send do not duplicate or lose tasks", async () => {
+  let finish;
+  const app = fixture({ send: () => new Promise((resolve) => { finish = resolve; }) });
+  app.scheduler.add("2026-10-18 09:00 第一条");
+  app.scheduler.add("2026-10-18 09:00 第二条");
+  app.at("2026-10-18 09:00");
+  const running = app.scheduler.tick();
+  await app.scheduler.tick();
+  assert.match(app.scheduler.cancel(app.scheduler.items[0].id), /已经开始/);
+  app.scheduler.cancel(app.scheduler.items[1].id);
+  app.scheduler.add("2026-10-19 09:00 第三条");
+  finish();
+  await running;
+  assert.deepEqual(app.scheduler.items.map((item) => item.status), ["sent", "cancelled", "pending"]);
+});
+
+test("corrupt, wrong-owner and wrong-platform reminder files fail closed without being overwritten", () => {
+  const app = fixture();
+  app.scheduler.add("daily 09:00 测试");
+  const original = JSON.parse(fs.readFileSync(app.options.filename));
+  for (const changes of [{ userId: "43" }, { platform: "discord" }, { items: [{ ...original.items[0], nextAt: "invalid" }] },
+    { items: [original.items[0], original.items[0]] }, { items: [{ ...original.items[0], status: "unknown_status" }] }]) {
+    const text = JSON.stringify({ ...original, ...changes });
+    fs.writeFileSync(app.options.filename, text);
+    assert.throws(() => new ReminderScheduler(app.options), (error) => error.kind === "state");
+    assert.equal(fs.readFileSync(app.options.filename, "utf8"), text);
+  }
+});
+
+test("credentials are redacted before persistence and disabled Discord DMs pause old tasks", async () => {
+  const credential = "synthetic_discord_credential";
+  const app = fixture({ sanitize: createRedactor({ DISCORD_BOT_TOKEN: credential }) });
+  app.scheduler.add(`daily 09:00 ${credential}`);
+  assert.ok(!fs.readFileSync(app.options.filename, "utf8").includes(credential));
+  const disabled = new ReminderScheduler({ ...app.options, enabled: false });
+  app.at("2026-10-20 12:00");
+  await disabled.tick();
+  assert.equal(app.sent.length, 0);
+  assert.match(disabled.add("daily 09:00 测试"), /关闭/);
+  assert.match(disabled.list(), /暂停/);
+});
+
+test("invalid times, empty/long contents, task limits and session file collisions never create reminders", () => {
+  const app = fixture();
+  for (const argument of ["2026-02-30 09:00 测试", "2026-10-17 09:00 测试", "daily 25:00 测试", "daily 09:00 ", `daily 09:00 ${"x".repeat(1001)}`]) {
+    assert.doesNotMatch(app.scheduler.add(argument), /已保存/);
+  }
+  assert.equal(app.scheduler.items.length, 0);
+  for (let index = 0; index < 50; index++) app.scheduler.add("daily 09:00 测试");
+  assert.match(app.scheduler.add("daily 10:00 超限"), /上限/);
+  assert.equal(app.scheduler.items.length, 50);
+  const filename = path.join(directory, "same-state.json");
+  assert.throws(() => loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42", SESSION_FILE: filename, REMINDER_FILE: filename }));
+  if (process.platform === "win32") {
+    assert.throws(() => loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42", SESSION_FILE: filename, REMINDER_FILE: filename.toUpperCase() }));
+  }
+});
+
+test("Telegram reminders require the authorized private chat, bypass Codex and can be managed while Codex is busy", async () => {
+  const app = fixture();
+  const config = loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42", SESSION_FILE: path.join(directory, `sessions-${++number}.json`) });
+  const replies = [];
+  let runs = 0;
+  let finish;
+  const handler = createMessageHandler({ config, reminders: app.scheduler, store: new SessionStore(config.sessionFile, config),
+    bot: { sendMessage: async (chat, text) => replies.push({ chat, text }), _request: async () => {} },
+    runner: () => { runs++; return new Promise((resolve) => { finish = () => resolve({ ok: true, text: "完成" }); }); } });
+  const message = (text, chat = 42, user = 42) => ({ text, chat: { id: chat }, from: { id: user }, message_id: 1 });
+  await handler(message("/remind daily 09:00 测试", 43, 43));
+  await handler(message("/remind daily 09:00 测试", -100));
+  assert.equal(app.scheduler.items.length, 0);
+  const running = handler(message("长任务"));
+  await new Promise((resolve) => setImmediate(resolve));
+  await handler(message("/remind daily 09:00 测试"));
+  await handler(message("/reminders"));
+  assert.equal(app.scheduler.items.length, 1);
+  assert.equal(runs, 1);
+  assert.match(replies.at(-1).text, /待发送/);
+  finish(); await running;
+});
+
+test("Discord native reminders are stored without interaction tokens and later sent via a fresh private Bot message", async () => {
+  const config = loadDiscordConfig({ DISCORD_BOT_TOKEN: "synthetic_discord_credential", DISCORD_ALLOWED_USER_ID: USER,
+    DISCORD_CHANNEL_IDS: CHANNEL, SESSION_FILE: path.join(directory, `discord-sessions-${++number}.json`) });
+  const calls = [];
+  const rest = { request: async (...args) => { calls.push(args); return args[1] === "/users/@me/channels" ? { id: CHANNEL } : {}; } };
+  const app = fixture({ platform: "discord", userId: USER, send: createDiscordReminderSender(rest) });
+  const handler = createMessageHandler({ config, store: new SessionStore(config.sessionFile, config), reminders: app.scheduler,
+    transport: createDiscordTransport(rest), runner: async () => { throw new Error("Codex must not be called"); } });
+  const dispatch = createDiscordDispatcher({ config, rest, handler });
+  await dispatch("READY", { user: { id: BOT, bot: true }, application: { id: APP } });
+  const interaction = { type: 2, id: "523456789012345678", application_id: APP, channel_id: CHANNEL,
+    token: "synthetic_interaction_credential", user: { id: USER }, data: { name: "remind", options: [{ type: 3, name: "details", value: "daily 09:00 私聊提醒" }] } };
+  await dispatch("INTERACTION_CREATE", { ...interaction, guild_id: "623456789012345678" });
+  assert.equal(app.scheduler.items.length, 0);
+  await dispatch("INTERACTION_CREATE", { ...interaction, id: "723456789012345678" });
+  assert.equal(app.scheduler.items.length, 1);
+  assert.ok(!fs.readFileSync(app.options.filename, "utf8").includes(interaction.token));
+  app.at("2026-10-18 09:00");
+  const beforeSend = calls.length;
+  await app.scheduler.tick();
+  const sent = calls.slice(beforeSend);
+  assert.equal(sent[0][1], "/users/@me/channels");
+  assert.deepEqual(sent[0][2], { recipient_id: USER });
+  assert.equal(sent[1][1], `/channels/${CHANNEL}/messages`);
+  assert.deepEqual(sent[1][2].allowed_mentions, { parse: [], replied_user: false });
+  assert.ok(!JSON.stringify(sent).includes(interaction.token));
+});
+
+test("scheduler start is idempotent, stop clears timers and restart recovery only runs when ticking", async () => {
+  let callback, cleared = 0;
+  const app = fixture({ timers: { setInterval: (fn, ms) => { assert.equal(ms, 5000); callback = fn; return 1; },
+    clearInterval: () => { cleared++; } } });
+  app.scheduler.start(); app.scheduler.start();
+  assert.equal(typeof callback, "function");
+  app.scheduler.stop();
+  assert.equal(cleared, 1);
+  assert.equal(app.scheduler.timer, undefined);
+  await app.scheduler.tick();
+  assert.equal(app.sent.length, 0);
+});

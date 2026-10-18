@@ -4,6 +4,8 @@
 
 同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
 
+`v1.1.0` 新增私聊定时消息。已有 Debian 服务使用运行包升级时，请按 [v1.1.0 升级步骤](UPGRADE-v1.1.0.md) 保留实际配置、会话及定时消息状态路径。
+
 远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
 
 ```bash
@@ -46,6 +48,7 @@ Discord 及全量测试要求 Node.js 22.4 或以上，且内置 WebSocket 未�
 | `CODEX_MODELS` | 逗号分隔的模型白名单 | 空，不限制符合格式的模型 ID |
 | `CODEX_TIMEOUT_MS` | 单轮超时，1000–3600000 毫秒 | `120000` |
 | `SESSION_FILE` | Bot 会话关联文件 | `index.js` 所在目录下的 `.bot-state/sessions.json` |
+| `REMINDER_FILE` | 私聊定时消息状态文件，与会话文件分开 | `SESSION_FILE` 同目录的 `telegram-reminders.json`；Discord 为 `discord-reminders.json` |
 
 `CODEX_MODELS` 是本地白名单，不是对账号模型列表的实时查询。填写账号及 provider 实际支持的模型 ID；若同时设置 `CODEX_MODEL` 和白名单，默认模型也必须在名单中。
 
@@ -104,6 +107,33 @@ npm start
 
 这两个命令无需新增 `.env` 字段或依赖。仅允许 `ALLOWED_USER_ID` 使用，群组命令支持 `@Bot用户名` 和原话题回复。
 
+## 私聊定时消息
+
+支持 TG 和 Discord 在指定时间主动发送保存的文字，任务由 Bot 自己调度并持久化，不需要修改 Debian cron、安装依赖或放开 Codex 写入权限。这不是定时调用模型生成报告，不消耗模型用量。请先与 Bot 建立私聊，所有创建、查看、取消操作只接受当前配置的授权用户，不能在群组或服务器频道管理，也不能指定其他收件人。
+
+所有时间固定为 **北京时间（UTC+08:00）**，与 Debian 系统时区无关。私聊中发送以下命令，示例日期须替换成未来日期：
+
+```text
+/remind 2026-10-19 09:00 喝水
+/remind daily 21:30 准备休息
+/reminders
+/cancelreminder 任务ID
+```
+
+`/remind` 指定日期时只发送一次；`daily` 每天发送，当天时间已到则从次日开始。保存成功后返回 8 位任务 ID、下一次发送时间和内容；`/reminders` 显示最近 20 条记录和发送结果。只支持精确的 `YYYY-MM-DD HH:mm` 或 `daily HH:mm` 格式，不让模型猜测自然语言时间。内容上限 1000 字符，环境凭据会在保存及发送前脱敏；不要在提醒中放真实密钥或密码。`/new` 不取消定时消息，需单独使用 `/cancelreminder`。
+
+Discord 普通文字命令也可写成 `!remind daily 21:30 准备休息`、`!reminders` 和 `!cancelreminder 任务ID`。新增原生斜杠命令是 `/remind details:...`、`/reminders`、`/cancelreminder id:...`，使用前按本文步骤预览并重新注册。定时发送使用 Bot 私聊接口，不保存或复用短期 interaction token，不向频道发送，也不会触发用户/角色提及。Discord 需保持 `DISCORD_ALLOW_DMS=true`，并允许 Bot 发私信；关闭此配置会暂停已有定时消息。TG 用户需先在 Bot 私聊中发送 `/start`，且不能屏蔽 Bot。
+
+服务正常运行时每 5 秒检查一次，到达时间后开始发送，实际到达时间受网络及平台限制影响，不能保证精确到秒。服务离线期间不会发送。重启后一次性任务会补发待发消息；每天任务只补发一次并安排下一次未来时间，不逐日补发所有错过的轮次。Bot 的普通任务忙碌不阻止定时消息管理，但平台的发送队列或限流仍可能造成延迟。
+
+每轮发送前先保存“发送中”，再调用平台接口。网络失败或进程在发送期间退出时，结果可能无法确认；该轮标记“发送未确认”，**不自动重发**，请先检查私聊记录。每天任务仍继续未来轮次。此策略避免不确定结果导致重复，但可能漏掉一条；不是端到端“恰好发送一次”的保证。开始发送后的消息不能撤回，待本次完成后可取消每天任务的后续轮次。状态写入失败时暂停调度，修复权限并重启后再检查结果，不重复创建相同任务。
+
+定时消息保存在独立 `REMINDER_FILE`，默认与 `SESSION_FILE` 同目录，按平台及授权用户 ID 校验；状态损坏、平台或用户不符时拒绝启动，不覆盖旧文件。可选自定义路径须在私有、已忽略目录，不能与会话文件相同，也不能给两个进程共享；每个平台仍只运行一个实例。新建目录/文件使用 `0700`/`0600`。最多 50 个待发任务、500 条总记录，结束和取消记录保留；总记录满时由维护者备份后归档，不自动删除文件。
+
+**升级与验收：** 先备份两个平台实际的 `REMINDER_FILE`、原会话状态及配置。新版本无需新增必填配置，发布包也包含 `reminders.js`；版本目录部署时必须继续固定 `SESSION_FILE`，让默认定时消息文件留在稳定目录。Discord 可先执行 `node discord.js --check-config`，它会校验已有定时状态和路径权限，但不会写入或发送。按原流程确认空闲后手动重启所需平台服务，再在私聊创建未来几分钟的测试消息，检查收到一次、列表显示已发送、取消任务不再发送，并验收一次受控重启恢复。只有服务器实际收到消息才算平台验收通过。
+
+**回滚：** 先备份当前配置、会话、定时消息文件及 unit，再按部署章节恢复旧入口并受控重启。旧版本不读取新定时文件，定时发送会停止，文件保留；以后恢复新版时，过期待发任务可能补发，先审查旧任务。不要用较早状态覆盖升级后新增的任务或发送结果，也不要删除状态文件来处理发送失败。
+
 ## 会话与错误处理
 
 首轮使用 `codex exec --json`，读取 `thread.started` 后立即保存 ID；后续使用 `codex exec resume <会话ID> --json`，不使用 `--last`。只将最后一条非 commentary 的 `agent_message` 返回 Telegram，不回传工具事件和原始 stderr。
@@ -125,6 +155,7 @@ node --check codex-runner.js
 node --check session-store.js
 node --check usage.js
 node --check quota.js
+node --check reminders.js
 node --check discord.js
 node --check discord-client.js
 git diff --check
@@ -198,7 +229,7 @@ node discord.js --register-commands
 node discord.js --register-commands --apply
 ```
 
-`--apply` 更新所选作用域内九个同名命令，其他命令保留。更新前读取现有定义，写入 `.local-backups/discord-commands-*.json` 私有备份，备份失败不更新。中途失败可能只更新了一部分，检查原因后可以重新执行。不自动删除任何命令。
+`--apply` 更新所选作用域内十二个同名命令，其他命令保留。更新前读取现有定义，写入 `.local-backups/discord-commands-*.json` 私有备份，备份失败不更新。中途失败可能只更新了一部分，检查原因后可以重新执行。不自动删除任何命令。
 
 斜杠命令先发送延迟确认，确认失败不执行任务；回复只对发起人可见。普通文字回复对所在频道可见。长回复自动分段，关闭用户、角色和 everyone 提及。交互有有效期，即使任务成功，极慢网络下回复仍可能失败，不得因此自动重跑任务。
 
@@ -272,7 +303,7 @@ journalctl -u codex-discord-bot.service --since "5 minutes ago" --no-pager
 node --version
 command -v curl tar sha256sum
 BOT_DIR=/home/codex/codex-tg-bot
-VERSION=1.0.0
+VERSION=1.1.0
 PACKAGE_DIR="$BOT_DIR/.local-backups/package-v$VERSION-$(date +%Y%m%d-%H%M%S)"
 umask 077
 mkdir -p "$PACKAGE_DIR"
@@ -312,8 +343,8 @@ systemctl show codex-discord-bot.service --property=User,WorkingDirectory,Fragme
 
 | 服务 | 需要核对的字段（示例路径） |
 | --- | --- |
-| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.0.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
-| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.0.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
+| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.1.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
+| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.1.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
 
 systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
 
@@ -333,6 +364,8 @@ journalctl -u codex-discord-bot.service -n 30 --no-pager
 在已同步的开发分支修改并运行 `npm test`；全量测试还需要现有 Git 和系统 `tar`。审查合并到 `master` 后，以干净工作区运行 `npm run build:release`。构建仅读取项目既有、锁定的已安装依赖，不联网、不自动安装、不修改依赖和锁文件。依赖缺失或版本不符时拒绝构建，恢复安装必须先由操作者确认。只支持当前纯 JavaScript 依赖组合，未来新增依赖需要重新审查打包逻辑。
 
 构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
+
+已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.1.0`，不要覆盖旧包或校验文件。
 
 ### Git 仓库部署方式
 
@@ -366,7 +399,7 @@ CODEX_HOME_DIR=/path/to/actual/codex-home
 BACKUP_DIR="$BOT_DIR/.local-backups/$(date +%Y%m%d-%H%M%S)"
 umask 077
 mkdir -p "$BACKUP_DIR/source"
-for file in index.js package.json package-lock.json .gitignore codex-runner.js session-store.js usage.js quota.js discord.js discord-client.js; do
+for file in index.js package.json package-lock.json .gitignore codex-runner.js session-store.js usage.js quota.js reminders.js discord.js discord-client.js; do
   if [ -f "$file" ]; then
     cp -a -- "$file" "$BACKUP_DIR/source/"
   fi
