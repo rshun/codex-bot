@@ -97,6 +97,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/reminders — 查看定时消息（仅私聊）",
     "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
     "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
+    "修改时间：把喝水提醒改成每天晚上10点、把提醒 任务ID 改成明天 08:30",
     `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
   ].join("\n");
 

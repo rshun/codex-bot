@@ -4,7 +4,7 @@
 
 同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
 
-`v1.3.0` 支持用“查看我的提醒”“取消喝水提醒”管理私聊提醒，TG 和 Discord 均可使用；也保留 v1.2.0 的自然语言创建功能。已有 Debian 服务使用运行包升级时，请按 [v1.3.0 升级步骤](UPGRADE-v1.3.0.md) 保留实际配置、会话及定时消息状态路径。
+`v1.4.0` 支持用“把喝水提醒改成每天晚上10点”修改私聊提醒时间，TG 和 Discord 均可使用；原有自然语言创建、查看和取消功能保留。已有 Debian 服务使用运行包升级时，请按 [v1.4.0 升级步骤](UPGRADE-v1.4.0.md) 保留实际配置、会话及定时消息状态路径。
 
 远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
 
@@ -149,6 +149,21 @@ npm start
 已经开始发送的消息不能撤回，需等本次完成后取消后续轮次。管理操作不调用模型，在 Codex 忙碌时仍可使用，授权和仅私聊限制与原命令一致。只有 Bot 返回“已取消定时消息”才代表取消成功；查看列表可核对持久状态。原 `/reminders`、`/cancelreminder` 保留，讨论取消语句时可使用 `/codex 取消喝水提醒`。
 
 无需新增依赖或配置，提醒状态格式不变。升级前仍备份实际状态和配置；验收时检查唯一匹配取消后不发送、多个匹配先保持原样、按 ID 只取消指定任务，以及重启后的取消结果。回滚到 v1.2.0 后原创建和调度继续有效，查看和取消改用斜杠命令。
+
+**自然语言修改时间（v1.4.0 起支持；v1.3.0 运行包不包含）：** TG 和 Discord 授权用户可在私聊中发送：
+
+```text
+把喝水提醒改成每天晚上10点
+把提醒 任务ID 改成明天早上八点半
+```
+
+支持“把/将……提醒改成/改为/修改为/调整为……”。新时间复用创建提醒的有限格式：每天、今天、明天、后天、今晚、明早或具体日期及时间，均按北京时间；“改成晚上10点”没有指定日期或每天，会提示补充。“每天”当天时间已过则安排到次日，一次性时间已过、日期无效或含糊表达都不会修改。每天与一次性任务可以互相转换，提醒内容保持不变。
+
+按内容做字面包含匹配（英文不区分大小写），忽略已结束或已取消的历史。唯一匹配才修改；多个匹配不改变任何任务，列出最多 20 个候选，按提示发送“把提醒 任务ID 改成每天 22:00”明确选择；无匹配也不改变状态。不支持批量修改；已开始发送的任务需等本次完成后再修改，已结束或已取消的任务不能重新激活。
+
+修改保留任务 ID、内容、创建时间和此前的发送结果，只更新执行时间及一次性/每天类型，保存成功才返回“已修改定时消息”、原计划和新计划。原时间不再触发，Bot 重启后继续按新时间调度；历史发送结果仍表示过去那一轮，不代表新时间已经发送。管理不调用模型，在 Codex 忙碌时仍可操作；讨论修改句子可使用 `/codex 把喝水提醒改成每天晚上10点`。
+
+无需新增依赖、配置或状态迁移。升级前备份原状态和配置；验收修改后旧时间不发、新时间收到一次、候选选择及重启恢复。回滚到 v1.3.0 时已保存的新时间仍有效，但不再识别修改语句；需要再改时先取消原任务，再创建新任务。不要用旧状态覆盖升级后的修改和发送结果。
 
 Discord 普通文字命令也可写成 `!remind daily 21:30 准备休息`、`!reminders` 和 `!cancelreminder 任务ID`。新增原生斜杠命令是 `/remind details:...`、`/reminders`、`/cancelreminder id:...`，使用前按本文步骤预览并重新注册。定时发送使用 Bot 私聊接口，不保存或复用短期 interaction token，不向频道发送，也不会触发用户/角色提及。Discord 需保持 `DISCORD_ALLOW_DMS=true`，并允许 Bot 发私信；关闭此配置会暂停已有定时消息。TG 用户需先在 Bot 私聊中发送 `/start`，且不能屏蔽 Bot。
 
@@ -371,8 +386,8 @@ systemctl show codex-discord-bot.service --property=User,WorkingDirectory,Fragme
 
 | 服务 | 需要核对的字段（示例路径） |
 | --- | --- |
-| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.3.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
-| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.3.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
+| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.4.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
+| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.4.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
 
 systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
 
@@ -393,7 +408,7 @@ journalctl -u codex-discord-bot.service -n 30 --no-pager
 
 构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
 
-已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.3.0`，不要覆盖旧包或校验文件。
+已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.4.0`，不要覆盖旧包或校验文件。
 
 ### Git 仓库部署方式
 
