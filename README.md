@@ -4,7 +4,7 @@
 
 同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
 
-`v1.4.0` 支持用“把喝水提醒改成每天晚上10点”修改私聊提醒时间，TG 和 Discord 均可使用；原有自然语言创建、查看和取消功能保留。已有 Debian 服务使用运行包升级时，请按 [v1.4.0 升级步骤](UPGRADE-v1.4.0.md) 保留实际配置、会话及定时消息状态路径。
+`v1.5.0` 支持中国大陆非工作日和一天多个时间点提醒，包含周末及官方放假日、排除调休工作日；原有创建、查看、修改和取消保留。TG、Discord 均可使用。Debian 请按 [v1.5.0 升级步骤](UPGRADE-v1.5.0.md) 保留原配置与状态；新增非工作日任务后的状态格式及降级限制见 [日历说明](HOLIDAY-CALENDAR.md)。
 
 远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
 
@@ -164,6 +164,22 @@ npm start
 修改保留任务 ID、内容、创建时间和此前的发送结果，只更新执行时间及一次性/每天类型，保存成功才返回“已修改定时消息”、原计划和新计划。原时间不再触发，Bot 重启后继续按新时间调度；历史发送结果仍表示过去那一轮，不代表新时间已经发送。管理不调用模型，在 Codex 忙碌时仍可操作；讨论修改句子可使用 `/codex 把喝水提醒改成每天晚上10点`。
 
 无需新增依赖、配置或状态迁移。升级前备份原状态和配置；验收修改后旧时间不发、新时间收到一次、候选选择及重启恢复。回滚到 v1.3.0 时已保存的新时间仍有效，但不再识别修改语句；需要再改时先取消原任务，再创建新任务。不要用旧状态覆盖升级后的修改和发送结果。
+
+**非工作日和多时间点（v1.5.0 起支持；v1.4.0 不包含）：** 现在可以识别原始表达，也可使用更简洁的句式：
+
+```text
+请在节假日的早上6点1分，11点2分添加添加定时任务： 在tg上发送测试消息
+非工作日早上6点1分、11点2分提醒我测试消息
+每天 06:01、11:02提醒我测试消息
+```
+
+这里“节假日”明确按**中国大陆非工作日：周末及官方放假日，排除调休工作日**处理。前两个例子会原子保存两条独立任务（北京时间 06:01、11:02，内容“测试消息”），各有自己的任务 ID；失败不会只保存一半。最多 8 个时间，重复时间合并；省略时段时继承前一个明确的“早上/下午”等时段，`HH:mm` 则按 24 小时制。成功回执列出 ID、规则和下次时间，之后可以查看、按 ID 修改或取消；多个同内容任务仍需明确选择。明确要求向 TG 发送的语句只在 TG 私聊执行，不跨平台发送。
+
+内置离线日历当前覆盖 **2026 年**，按官方放假、调休安排判断；不新增依赖、不在定时发送时查询网络。可用可选 `HOLIDAY_CALENDAR_FILE` 固定自己的完整日历路径，更新数据后受控重启。未知年份不猜测：创建时无下一个已覆盖日期则整体拒绝；运行中到达日历边界时，只暂停非工作日任务，普通每天/一次性任务继续。列表会显示“日历待更新”。详情、来源、更新格式和回滚步骤见 [节假日日历说明](HOLIDAY-CALENDAR.md)。
+
+非工作日任务离线恢复时不在工作日补发，也不重放过去日期的消息；当天的时间尚未到则等待，到时或当天已过时每个时间点最多补发一轮。日历暂停任务在更新日历并重启后只安排未来时间。未识别的明确“添加定时任务”请求会由 Bot 提示格式，不再交给 Codex 误报缺少 Telegram 接口。普通讨论和 `/codex` 仍进入原对话。
+
+旧任务无需迁移；**创建非工作日任务后，提醒文件会写为版本 2，v1.4.0 及更早版本不能直接读取（即使该类任务已取消，历史仍保留）**。降级前必须保留完整新版状态，并按日历说明导出单独的旧类型兼容副本，不能直接覆盖为升级前旧状态。
 
 Discord 普通文字命令也可写成 `!remind daily 21:30 准备休息`、`!reminders` 和 `!cancelreminder 任务ID`。新增原生斜杠命令是 `/remind details:...`、`/reminders`、`/cancelreminder id:...`，使用前按本文步骤预览并重新注册。定时发送使用 Bot 私聊接口，不保存或复用短期 interaction token，不向频道发送，也不会触发用户/角色提及。Discord 需保持 `DISCORD_ALLOW_DMS=true`，并允许 Bot 发私信；关闭此配置会暂停已有定时消息。TG 用户需先在 Bot 私聊中发送 `/start`，且不能屏蔽 Bot。
 
@@ -386,8 +402,8 @@ systemctl show codex-discord-bot.service --property=User,WorkingDirectory,Fragme
 
 | 服务 | 需要核对的字段（示例路径） |
 | --- | --- |
-| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.4.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
-| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.4.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
+| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.5.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
+| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.5.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
 
 systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
 
@@ -408,7 +424,7 @@ journalctl -u codex-discord-bot.service -n 30 --no-pager
 
 构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
 
-已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.4.0`，不要覆盖旧包或校验文件。
+已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.5.0`，不要覆盖旧包或校验文件。
 
 ### Git 仓库部署方式
 

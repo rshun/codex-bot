@@ -177,7 +177,7 @@ async function startDiscord() {
   const rest = new DiscordRest(config.token);
   const transport = createDiscordTransport(rest);
   const reminders = new ReminderScheduler({ filename: config.reminderFile, platform: "discord",
-    userId: config.allowedUserId, enabled: config.allowDms, sanitize: createRedactor(config.env),
+    userId: config.allowedUserId, enabled: config.allowDms, sanitize: createRedactor(config.env), calendarFile: config.calendarFile,
     send: createDiscordReminderSender(rest) });
   const handler = createMessageHandler({ config, store, transport, reminders });
   const dispatch = createDiscordDispatcher({ config, rest, handler });
@@ -202,7 +202,7 @@ async function main(args = process.argv.slice(2)) {
   if (args.includes("--check-config")) {
     const config = loadDiscordConfig(process.env);
     new SessionStore(config.sessionFile, config);
-    new ReminderScheduler({ filename: config.reminderFile, platform: "discord", userId: config.allowedUserId });
+    new ReminderScheduler({ filename: config.reminderFile, platform: "discord", userId: config.allowedUserId, calendarFile: config.calendarFile });
     if (typeof globalThis.WebSocket !== "function") throw new DiscordError("node_websocket_required");
     try { fs.accessSync(config.workdir, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK); }
     catch { throw new DiscordError("working_directory"); }
