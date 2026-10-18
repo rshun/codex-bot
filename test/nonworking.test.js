@@ -147,16 +147,19 @@ test("nonworking edits explicitly preserve or change the rule and retain the ori
   assert.equal(app.scheduler.items[0].id, id); assert.equal(JSON.parse(fs.readFileSync(app.options.filename)).version, 1);
 });
 
-test("the exact Telegram request is handled privately without Codex, and explicit cross-platform sends are rejected", async () => {
-  const app = fixture(); const replies = [];
+test("semantic nonworking plans require current private delivery and persist both times", async () => {
+  const { response, entry, context } = require("./support/semantic");
+  const app = fixture(), replies = [];
   const config = loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42" });
+  let session = { threadId: null, model: null };
   const handler = createMessageHandler({ config, reminders: app.scheduler,
-    store: { get: () => { throw new Error("No conversation should start"); } }, bot: { sendMessage: async (id, text) => replies.push(text) },
-    runner: async () => { throw new Error("No Codex should start"); } });
+    store: { get: () => ({ ...session }), set: (key, value) => { session = { ...value }; } },
+    bot: { sendMessage: async (id, text) => replies.push(text), _request: async () => {} },
+    runner: async options => response(options, "create", batch.times.map(time => entry("nonworking", time, batch.text)), "",
+      context(options).currentMessage.includes("discord") ? "other" : "current") });
   const message = (text, id = 42, user = 42) => ({ text, chat: { id }, from: { id: user }, message_id: 1 });
   await handler(message(original, -100)); assert.match(replies.at(-1), /私聊/); assert.equal(app.scheduler.items.length, 0);
   await handler(message(original, 43, 43)); assert.equal(replies.at(-1), "未授权。");
   await handler(message(original.replace("tg", "discord"))); assert.match(replies.at(-1), /目标平台/); assert.equal(app.scheduler.items.length, 0);
   await handler(message(original)); assert.match(replies.at(-1), /已保存 2 个/); assert.equal(app.scheduler.items.length, 2);
-  await handler(message("每晚9点提醒我喝水")); assert.match(replies.at(-1), /未创建提醒/); assert.equal(app.scheduler.items.length, 2);
 });

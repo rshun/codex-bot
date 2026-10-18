@@ -2,20 +2,21 @@ const { spawn } = require("node:child_process");
 const { THREAD_ID, MODEL_NAME } = require("./session-store");
 const { normalizeUsage } = require("./usage");
 
-function buildArgs({ threadId, model }) {
+function buildArgs({ threadId, model, outputSchema }) {
   if (threadId && !THREAD_ID.test(threadId)) throw new Error("Invalid thread ID");
   if (model && !MODEL_NAME.test(model)) throw new Error("Invalid model name");
   const args = ["exec"];
   if (threadId) args.push("resume");
   args.push("--json", "--skip-git-repo-check");
   if (model) args.push("--model", model);
+  if (outputSchema) args.push("--output-schema", outputSchema);
   if (threadId) args.push(threadId);
   // Prompts use stdin so text beginning with '-' cannot become CLI options.
   args.push("-");
   return args;
 }
 
-function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThread }, spawnProcess = spawn) {
+function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThread, outputSchema }, spawnProcess = spawn) {
   return new Promise((resolve) => {
     let child;
     const childEnv = { ...env };
@@ -24,7 +25,7 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
     delete childEnv.DISCORD_ALLOWED_USER_ID;
     delete childEnv.ALLOWED_USER_ID;
     try {
-      child = spawnProcess(bin, buildArgs({ threadId, model }), {
+      child = spawnProcess(bin, buildArgs({ threadId, model, outputSchema }), {
         cwd: workdir, env: childEnv, shell: false, stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {

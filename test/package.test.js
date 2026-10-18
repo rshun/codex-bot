@@ -37,7 +37,9 @@ test("release archive is complete, portable and excludes private files and sourc
       if(!resolved.startsWith(base+path.sep))throw new Error('Dependency outside package');
       require(resolved);
     }
-    for(const name of ['index','discord','discord-client','session-store','usage','quota','codex-runner'])require('./'+name);
+    for(const name of ['index','discord','discord-client','session-store','usage','quota','codex-runner','semantic-reminders'])require('./'+name);
+    const schema=require('./reminder-response.schema.json');
+    if(!schema.properties.action.enum.includes('update')||!fs.existsSync('SEMANTIC-REMINDERS.md')||!fs.existsSync('UPGRADE-v1.6.0.md'))throw new Error('Semantic reminder runtime missing');
     const {parseNaturalReminder}=require('./reminders');
     if(parseNaturalReminder('每天晚上9点提醒我喝水').argument!=='daily 21:00 喝水')throw new Error('Natural reminder missing');
     if(parseNaturalReminder('查看我的提醒').command!=='reminders')throw new Error('Natural list missing');

@@ -10,11 +10,13 @@ function validateSession(session) {
   return session && typeof session === "object" &&
     (session.threadId === null || (typeof session.threadId === "string" && THREAD_ID.test(session.threadId))) &&
     (session.model === null || (typeof session.model === "string" && MODEL_NAME.test(session.model))) &&
-    validateReport(session.lastUsage);
+    validateReport(session.lastUsage) &&
+    (session.reminderReceipt === undefined || (typeof session.reminderReceipt === "string" && session.reminderReceipt.length <= 16000));
 }
 
 function copySession(session) {
   return { threadId: session.threadId, model: session.model,
+    ...(session.reminderReceipt !== undefined ? { reminderReceipt: session.reminderReceipt } : {}),
     ...(session.lastUsage !== undefined ? { lastUsage: copyReport(session.lastUsage) } : {}) };
 }
 

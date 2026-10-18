@@ -1,4 +1,5 @@
 const test = require("node:test");
+const { context: turnContext, response, entry } = require("./support/semantic");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -468,104 +469,57 @@ test("Telegram reminders require the authorized private chat, bypass Codex and c
   finish(); await running;
 });
 
-test("Telegram natural reminders enforce private authorization, work while busy and leave normal conversation intact", async () => {
+test("Telegram semantic actions share conversation, wait while busy, and /codex cannot mutate reminders", async () => {
   const app = fixture();
   const config = loadConfig({ TELEGRAM_BOT_TOKEN: "synthetic_credential", ALLOWED_USER_ID: "42", SESSION_FILE: path.join(directory, `sessions-${++number}.json`) });
   const replies = [], prompts = [];
-  let finish;
+  let release;
   const handler = createMessageHandler({ config, reminders: app.scheduler, store: new SessionStore(config.sessionFile, config),
     bot: { sendMessage: async (chat, text) => replies.push(text), _request: async () => {} },
-    runner: ({ prompt }) => { prompts.push(prompt); return new Promise((resolve) => { finish = () => resolve({ ok: true, text: "完成" }); }); } });
+    runner: async options => {
+      prompts.push(options);
+      const ctx = turnContext(options);
+      if (ctx.currentMessage === "长任务") await new Promise(resolve => { release = resolve; });
+      if (ctx.currentMessage === "设置一个喝水的提醒，每天晚上九点") return response(options, "create", [entry("daily", "21:00", "喝水")]);
+      return response(options, "chat", [], "普通回答");
+    } });
   const message = (text, chat = 42, user = 42) => ({ text, chat: { id: chat }, from: { id: user }, message_id: 1 });
-  await handler(message("每天晚上9点提醒我喝水", 43, 43));
-  assert.equal(replies.at(-1), "未授权。");
-  await handler(message("每天晚上9点提醒我喝水", -100));
-  assert.match(replies.at(-1), /私聊/);
-  await handler(message("每天9点提醒我喝水"));
-  assert.match(replies.at(-1), /未创建提醒/);
-  assert.equal(app.scheduler.items.length, 0);
-  assert.equal(prompts.length, 0);
-  const running = handler(message("普通对话"));
-  await new Promise((resolve) => setImmediate(resolve));
-  await handler(message("每天晚上9点提醒我喝水"));
-  assert.match(replies.at(-1), /已保存定时消息/);
-  assert.match(replies.at(-1), /2026-10-18 21:00（北京时间）/);
-  assert.equal(app.scheduler.items.length, 1);
-  assert.equal(prompts.length, 1);
-  await handler(message("查看我的提醒"));
-  assert.match(replies.at(-1), /喝水/);
-  await handler(message("查看我的提醒", -100));
-  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
-  await handler(message("取消喝水提醒", -100));
-  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
-  await handler(message("取消喝水提醒", 43, 43));
-  assert.equal(replies.at(-1), "未授权。");
-  await handler(message("把喝水提醒改成每天晚上10点", -100));
-  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
-  await handler(message("把喝水提醒改成每天晚上10点", 43, 43));
-  assert.equal(replies.at(-1), "未授权。");
-  await handler(message("把喝水提醒改成每天9点"));
-  assert.match(replies.at(-1), /未修改提醒/);
-  assert.equal(app.scheduler.items[0].time, "21:00");
-  await handler(message("把喝水提醒改成每天晚上10点"));
-  assert.match(replies.at(-1), /已修改定时消息/);
-  assert.equal(app.scheduler.items[0].time, "22:00");
-  assert.equal(prompts.length, 1);
-  await handler(message("取消喝水提醒可以吗"));
-  assert.match(replies.at(-1), /未取消提醒/);
-  assert.equal(app.scheduler.items[0].status, "pending");
-  await handler(message("取消喝水提醒"));
-  assert.match(replies.at(-1), /已取消定时消息/);
-  await handler(message("查看我的提醒"));
-  assert.match(replies.at(-1), /已取消/);
-  assert.equal(prompts.length, 1);
-  finish(); await running;
-  const discussion = handler(message("/codex 每天晚上9点提醒我喝水"));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(prompts.at(-1), "每天晚上9点提醒我喝水");
-  finish(); await discussion;
-  const editDiscussion = handler(message("/codex 把喝水提醒改成每天晚上11点"));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(prompts.at(-1), "把喝水提醒改成每天晚上11点");
-  finish(); await editDiscussion;
-  assert.equal(app.scheduler.items[0].time, "22:00");
-  assert.equal(app.scheduler.items.length, 1);
+  await handler(message("设置一个喝水的提醒，每天晚上九点", 43, 43));
+  assert.equal(replies.at(-1), "未授权。"); assert.equal(prompts.length, 0);
+  await handler(message("设置一个喝水的提醒，每天晚上九点", -100));
+  assert.match(replies.at(-1), /私聊/); assert.equal(app.scheduler.items.length, 0);
+  assert.deepEqual(turnContext(prompts.at(-1)).tasks, []);
+  const running = handler(message("长任务"));
+  await new Promise(resolve => setImmediate(resolve));
+  await handler(message("设置一个喝水的提醒，每天晚上九点"));
+  assert.match(replies.at(-1), /正在处理上一条/);
+  await handler(message("/reminders")); assert.match(replies.at(-1), /暂无/);
+  release(); await running;
+  await handler(message("设置一个喝水的提醒，每天晚上九点"));
+  assert.match(replies.at(-1), /已保存 1 个/); assert.equal(app.scheduler.items[0].time, "21:00");
+  await handler(message("/codex 把喝水提醒改成每天晚上十点"));
+  assert.equal(turnContext(prompts.at(-1)).allowActions, false);
+  assert.equal(replies.at(-1), "普通回答"); assert.equal(app.scheduler.items[0].time, "21:00");
 });
 
-test("Discord private natural text uses the same grammar and honors disabled private sending", async () => {
+test("Discord semantic plans use the shared executor and honor private delivery settings", async () => {
   const config = loadDiscordConfig({ DISCORD_BOT_TOKEN: "synthetic_discord_credential", DISCORD_ALLOWED_USER_ID: USER,
     DISCORD_CHANNEL_IDS: CHANNEL, SESSION_FILE: path.join(directory, `discord-sessions-${++number}.json`) });
   const app = fixture({ platform: "discord", userId: USER });
   const replies = [];
   const handler = createMessageHandler({ config, reminders: app.scheduler, store: new SessionStore(config.sessionFile, config),
-    transport: { reply: async (msg, text) => replies.push(text) }, runner: async () => { throw new Error("Codex must not be called"); } });
+    transport: { reply: async (msg, text) => replies.push(text), markReceived: async () => {} },
+    runner: async options => response(options, "create", [entry("daily", "21:00", "喝水")]) });
   const dispatch = createDiscordDispatcher({ config, rest: { request: async () => ({}) }, handler });
   await dispatch("READY", { user: { id: BOT, bot: true }, application: { id: APP } });
-  const message = { id: "523456789012345678", channel_id: CHANNEL, author: { id: USER }, content: "每天晚上9点提醒我喝水" };
+  const message = { id: "523456789012345678", channel_id: CHANNEL, author: { id: USER }, content: "设置每天晚上九点的喝水提醒" };
   await dispatch("MESSAGE_CREATE", { ...message, guild_id: APP });
-  assert.equal(app.scheduler.items.length, 0);
-  assert.match(replies.at(-1), /私聊/);
+  assert.equal(app.scheduler.items.length, 0); assert.match(replies.at(-1), /私聊/);
   await dispatch("MESSAGE_CREATE", { ...message, id: "623456789012345678" });
-  assert.equal(app.scheduler.items.length, 1);
-  assert.equal(app.scheduler.items[0].time, "21:00");
-  await dispatch("MESSAGE_CREATE", { ...message, id: "1123456789012345678", guild_id: APP, content: "把喝水提醒改成每天晚上10点" });
-  assert.match(replies.at(-1), /私聊/);
-  assert.equal(app.scheduler.items[0].time, "21:00");
-  await dispatch("MESSAGE_CREATE", { ...message, id: "1223456789012345678", content: "把喝水提醒改成每天晚上10点" });
-  assert.match(replies.at(-1), /已修改定时消息/);
-  assert.equal(new ReminderScheduler(app.options).items[0].time, "22:00");
+  assert.equal(app.scheduler.items.length, 1); assert.equal(app.scheduler.items[0].time, "21:00");
   app.scheduler.enabled = false;
   await dispatch("MESSAGE_CREATE", { ...message, id: "723456789012345678" });
-  assert.match(replies.at(-1), /私聊发送已关闭/);
-  assert.equal(app.scheduler.items.length, 1);
-  await dispatch("MESSAGE_CREATE", { ...message, id: "823456789012345678", content: "查看我的提醒" });
-  assert.match(replies.at(-1), /喝水/);
-  await dispatch("MESSAGE_CREATE", { ...message, id: "923456789012345678", guild_id: APP, content: "取消喝水提醒" });
-  assert.match(replies.at(-1), /私聊/);
-  assert.equal(app.scheduler.items[0].status, "pending");
-  await dispatch("MESSAGE_CREATE", { ...message, id: "1023456789012345678", content: "取消喝水提醒" });
-  assert.match(replies.at(-1), /已取消/);
-  assert.equal(app.scheduler.items[0].status, "cancelled");
+  assert.match(replies.at(-1), /私聊发送已关闭/); assert.equal(app.scheduler.items.length, 1);
 });
 
 test("Discord native reminders are stored without interaction tokens and later sent via a fresh private Bot message", async () => {

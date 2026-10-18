@@ -4,7 +4,8 @@ const { SessionStore, MODEL_NAME } = require("./session-store");
 const { runCodex } = require("./codex-runner");
 const { formatUsage } = require("./usage");
 const { queryQuota, formatQuota } = require("./quota");
-const { ReminderScheduler, parseNaturalReminder } = require("./reminders");
+const { ReminderScheduler } = require("./reminders");
+const { prepareTurn, parseResponse, applyResponse } = require("./semantic-reminders");
 
 function loadConfig(env, { platform = "telegram" } = {}) {
   if (!["telegram", "discord"].includes(platform)) throw new Error("无效的平台配置。");
@@ -125,15 +126,10 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     if (name === "id") return reply(msg, `你的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID：${msg.from.id}`);
     if (String(msg.from.id) !== config.allowedUserId) return reply(msg, "未授权。");
 
-    const natural = !msg.text.trimStart().startsWith("/")
-      ? parseNaturalReminder(msg.text, reminders ? reminders.now() : Date.now()) : null;
-    if (["remind", "reminders", "cancelreminder"].includes(name) || natural) {
-      const privateChat = config.platform === "discord" ? msg.chat.type === "private"
-        : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
+    const privateChat = config.platform === "discord" ? msg.chat.type === "private"
+      : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
+    if (["remind", "reminders", "cancelreminder"].includes(name)) {
       if (!privateChat) return reply(msg, "定时消息请在与 Bot 的私聊中设置和管理。");
-      if (natural?.platform && natural.platform !== config.platform) return reply(msg, "未创建任务：这里只能向当前平台的授权用户私聊发送，请在目标平台的 Bot 私聊中设置。");
-      if (natural?.error) return reply(msg, natural.error);
-      if (natural) return reply(msg, reminders ? reminders.command(natural.command || "remind", natural.argument) : "定时消息功能尚未启用。");
       return reply(msg, reminders ? reminders.command(name, argument) : "定时消息功能尚未启用。");
     }
 
@@ -185,7 +181,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
       return reply(msg, `后续消息将使用：${model || config.defaultModel || "Codex CLI 默认配置"}。上下文保留；模型可用性将在下次调用时验证。`);
     }
     if (name === "new") {
-      try { store.set(key, { ...session, threadId: null, lastUsage: null }); }
+      try { store.set(key, { ...session, threadId: null, lastUsage: null, reminderReceipt: "" }); }
       catch { return reply(msg, "新会话状态保存失败，请检查状态目录权限。"); }
       stateFailures.delete(key);
       return reply(msg, "已开始新对话，模型选择保留。下一条消息将创建新会话。");
@@ -208,9 +204,12 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
             reaction: JSON.stringify([{ type: "emoji", emoji: "👀" }]), is_big: false },
         });
       } catch { logger.warn("Message reaction failed."); }
+      const turn = reminders ? prepareTurn({ scheduler: reminders, text: prompt, privateChat,
+        allowActions: name !== "codex", receipt: session.reminderReceipt || "", redact }) : null;
       const result = await runner({
         bin: config.bin, workdir: config.workdir, env: { ...config.env, CODEX_HOME: config.codexHome },
-        prompt, threadId: session.threadId, model: selectedModel, timeoutMs: config.timeoutMs,
+        prompt: turn ? turn.prompt : prompt, threadId: session.threadId, model: selectedModel, timeoutMs: config.timeoutMs,
+        ...(turn ? { outputSchema: turn.outputSchema } : {}),
         onThread: (threadId) => store.set(key, { ...session, threadId }),
       });
       let usageWarning = "";
@@ -223,7 +222,25 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
         logger.error("Usage persistence failed.");
         usageWarning = "\n\n用量保存失败，请检查状态目录权限。任务可能已经执行，请先核实结果。";
       }
-      if (result.ok) return await reply(msg, result.text + usageWarning);
+      if (result.ok) {
+        let responsePlan;
+        if (turn) {
+          try { responsePlan = parseResponse(result.text, turn); }
+          catch { /* applyResponse returns a controlled diagnostic below. */ }
+        }
+        // Persistence failure must never turn a model proposal into an untracked reminder write.
+        if (turn && usageWarning) return await reply(msg, (responsePlan?.action === "chat" ? responsePlan.message
+          : "会话用量保存失败，未执行任何定时操作。请检查状态目录权限。") + usageWarning);
+        const answer = turn ? applyResponse(result.text, turn, reminders) : result.text;
+        if (turn && responsePlan?.action !== "chat") {
+          try { store.set(key, { ...store.get(key), reminderReceipt: redact(answer).slice(0, 16000) }); }
+          catch {
+            stateFailures.add(key);
+            usageWarning = "\n\n回执上下文保存失败，请检查状态目录权限。以上为实际执行结果，请先核对任务列表，不要重复创建。";
+          }
+        }
+        return await reply(msg, answer + usageWarning);
+      }
       if (result.kind === "state") stateFailures.add(key);
       const errors = {
         launch: "Codex 启动失败，请检查 CODEX_BIN、WORKDIR 和执行权限。",

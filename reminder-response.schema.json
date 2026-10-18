@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nonce", "action", "message", "delivery", "entries"],
+  "properties": {
+    "nonce": { "type": "string" },
+    "action": { "type": "string", "enum": ["chat", "clarify", "list", "create", "update", "cancel"] },
+    "message": { "type": "string" },
+    "delivery": { "type": "string", "enum": ["current", "other"] },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "time", "text"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["", "once", "daily", "nonworking"] },
+          "time": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  }
+}
