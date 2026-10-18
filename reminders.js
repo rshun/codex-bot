@@ -14,6 +14,7 @@ const HELP = [
   "也可直接说：每天晚上9点提醒我喝水、明天早上8点半提醒我吃早餐",
   "/reminders — 查看任务及最近发送结果",
   "/cancelreminder 任务ID — 取消待发任务",
+  "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
   "到时发送保存的文字，不调用 Codex。Bot 需保持运行。",
 ].join("\n");
 const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消" };
@@ -51,6 +52,23 @@ function chineseNumber(value) {
 // Keep reminder content untouched; normalize only the time expression.
 function parseNaturalReminder(text, now = Date.now()) {
   const request = text.trim().replace(/^(?:请帮我|帮我|请)\s*/, "");
+  const management = request.replace(/[。！!]$/, "").trim();
+  if (/^(?:(?:查看|查询|列出|看看)(?:一下)?\s*(?:我的\s*)?(?:(?:全部|所有)\s*)?(?:定时)?提醒(?:列表)?|我有哪些提醒|提醒列表)$/.test(management)) {
+    return { command: "reminders", argument: "" };
+  }
+  const cancelId = management.match(/^(?:取消|撤销)\s*(?:我的)?\s*提醒\s*([a-f0-9]{8})$/i);
+  if (cancelId) return { command: "cancelreminder", argument: cancelId[1].toLowerCase() };
+  const cancelText = management.match(/^(?:取消|撤销)\s*(?:我的)?\s*(.*?)\s*(?:的)?提醒$/);
+  if (cancelText) {
+    const query = cancelText[1].trim();
+    if (query && query.length <= 1000 && !/^(?:全部|所有)(?:的)?$/.test(query) && !/[?？\r\n]|提醒/.test(query)) {
+      return ID.test(query.toLowerCase()) ? { command: "cancelreminder", argument: query.toLowerCase() }
+        : { command: "cancelmatching", argument: query };
+    }
+  }
+  if (/^(?:取消|撤销)[\s\S]*提醒/.test(management)) {
+    return { error: "未取消提醒：请说“取消喝水提醒”或“取消提醒 任务ID”。一次只取消一个明确任务，不支持批量取消。" };
+  }
   if (!/^(?:每天|每日|今天|明天|后天|今晚|明早|\d{4}[-年]|每周|每月|下周|周[一二三四五六日天]|早上|上午|中午|下午|晚上|凌晨)/.test(request) ||
       !request.includes("提醒我")) return null;
   const invalid = { error: "未创建提醒：请明确日期或每天、上午/下午及时间，例如“每天晚上9点提醒我喝水”或“明天 08:30 提醒我出门”。目前支持每天、今天、明天、后天及具体日期，均为北京时间。" };
@@ -194,10 +212,27 @@ class ReminderScheduler {
     return `已取消定时消息：${id}`;
   }
 
+  cancelMatching(query) {
+    if (typeof query !== "string" || !query.trim() || query.length > 1000) return "请提供要取消的提醒内容，未取消任何任务。";
+    query = query.trim();
+    // Search only active tasks, using literal contents rather than model guesses or regular expressions.
+    const matches = this.items.filter((item) => ["pending", "sending"].includes(item.status) &&
+      item.text.toLowerCase().includes(query.toLowerCase()));
+    if (!matches.length) return "未找到匹配的待发提醒，未取消任何任务。请说“查看我的提醒”核对内容，或使用“取消提醒 任务ID”。";
+    if (matches.length > 1) {
+      const lines = matches.slice(0, 20).map((item) =>
+        `${item.id} · ${LABELS[item.status]} · ${item.kind === "daily" ? `每天 ${item.time}；下次 ` : ""}${formatTime(Date.parse(item.nextAt))}（北京时间）\n${item.text}`);
+      return [`匹配到 ${matches.length} 个待发或发送中的提醒，未取消任何任务。请发送“取消提醒 任务ID”明确选择：`,
+        ...lines, ...(matches.length > 20 ? ["这里只显示前 20 条，请用更具体的提醒内容缩小范围。"] : [])].join("\n");
+    }
+    return `${this.cancel(matches[0].id)}\n内容：${matches[0].text}`;
+  }
+
   command(name, argument) {
     try {
       if (name === "remind") return this.add(argument);
       if (name === "reminders") return this.list();
+      if (name === "cancelmatching") return this.cancelMatching(argument);
       return this.cancel(argument);
     } catch { return "定时任务保存失败，调度已暂停；请检查状态目录权限并重启 Bot。"; }
   }

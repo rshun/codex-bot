@@ -96,6 +96,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "也可直接说：每天晚上9点提醒我喝水（北京时间，仅私聊）",
     "/reminders — 查看定时消息（仅私聊）",
     "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
+    "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
     `/id — 查看自己的 ${config.platform === "discord" ? "Discord" : "Telegram"} 用户 ID`,
   ].join("\n");
 
@@ -129,7 +130,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
         : String(msg.chat.id) === config.allowedUserId && (!msg.chat.type || msg.chat.type === "private");
       if (!privateChat) return reply(msg, "定时消息请在与 Bot 的私聊中设置和管理。");
       if (natural?.error) return reply(msg, natural.error);
-      if (natural) return reply(msg, reminders ? reminders.command("remind", natural.argument) : "定时消息功能尚未启用。");
+      if (natural) return reply(msg, reminders ? reminders.command(natural.command || "remind", natural.argument) : "定时消息功能尚未启用。");
       return reply(msg, reminders ? reminders.command(name, argument) : "定时消息功能尚未启用。");
     }
 

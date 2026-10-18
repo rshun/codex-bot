@@ -102,6 +102,95 @@ test("natural reminders reuse persistence, daily rollover, cancellation and priv
   assert.match(app.scheduler.command("remind", parseNaturalReminder("今天早上7点提醒我出门", app.options.now()).argument), /已经过去/);
 });
 
+test("natural reminder management parses complete requests and rejects unsafe cancellation forms", () => {
+  for (const input of ["查看我的提醒", "请帮我查看我的提醒。", "查询所有提醒", "看看我的提醒列表", "我有哪些提醒"]) {
+    assert.deepEqual(parseNaturalReminder(input), { command: "reminders", argument: "" }, input);
+  }
+  for (const input of ["取消喝水提醒", "请取消我的喝水提醒。", "撤销喝水的提醒"]) {
+    assert.deepEqual(parseNaturalReminder(input), { command: "cancelmatching", argument: "喝水" }, input);
+  }
+  for (const input of ["取消提醒 ABCDEF12", "取消abcdef12提醒", "取消ABCDEF12提醒"]) {
+    assert.deepEqual(parseNaturalReminder(input), { command: "cancelreminder", argument: "abcdef12" }, input);
+  }
+  for (const input of ["取消所有提醒", "取消全部的提醒", "取消提醒", "取消喝水提醒？", "取消喝水提醒可以吗",
+    "取消喝水提醒和吃饭提醒", "取消喝水提醒\n取消吃饭提醒"]) {
+    assert.match(parseNaturalReminder(input).error, /未取消提醒/, input);
+  }
+  for (const input of ["怎么查看我的提醒", "查看我的提醒？", "不要取消喝水提醒", "“取消喝水提醒”", "/codex 取消喝水提醒"]) {
+    assert.equal(parseNaturalReminder(input), null, input);
+  }
+});
+
+test("content cancellation ignores history, persists the single active match and prevents future delivery", async () => {
+  const app = fixture();
+  app.scheduler.add("2026-10-18 08:01 喝水");
+  app.at("2026-10-18 08:01");
+  await app.scheduler.tick();
+  app.scheduler.add("daily 21:00 记得喝水");
+  const id = app.scheduler.items[1].id;
+  const intent = parseNaturalReminder("取消喝水提醒");
+  const result = app.scheduler.command(intent.command, intent.argument);
+  assert.match(result, new RegExp(`已取消定时消息：${id}`));
+  assert.match(result, /记得喝水/);
+  const restored = new ReminderScheduler(app.options);
+  assert.equal(restored.items[0].status, "sent");
+  assert.equal(restored.items[1].status, "cancelled");
+  const before = fs.readFileSync(app.options.filename, "utf8");
+  assert.match(restored.command(intent.command, intent.argument), /未找到匹配/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  app.at("2026-10-18 21:00");
+  await restored.tick();
+  assert.equal(app.sent.length, 1);
+});
+
+test("multiple content matches remain unchanged until a precise natural ID cancellation", () => {
+  const app = fixture();
+  app.scheduler.add("daily 09:00 喝水");
+  app.scheduler.add("daily 21:00 运动后喝水");
+  const before = fs.readFileSync(app.options.filename, "utf8");
+  const result = app.scheduler.command("cancelmatching", "喝水");
+  assert.match(result, /匹配到 2 个/);
+  assert.match(result, /未取消任何任务/);
+  assert.match(result, /09:00/); assert.match(result, /21:00/);
+  for (const task of app.scheduler.items) assert.ok(result.includes(task.id));
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  const intent = parseNaturalReminder(`取消提醒 ${app.scheduler.items[1].id}`);
+  assert.match(app.scheduler.command(intent.command, intent.argument), /已取消/);
+  assert.equal(app.scheduler.items[0].status, "pending");
+  assert.equal(app.scheduler.items[1].status, "cancelled");
+  assert.match(app.scheduler.command(intent.command, intent.argument), /已经结束或取消/);
+});
+
+test("literal keyword matching never treats wildcards as patterns and bounds long candidate lists", () => {
+  const app = fixture();
+  for (let i = 0; i < 21; i++) app.scheduler.add(`daily 21:00 喝水 ${i}`);
+  const before = fs.readFileSync(app.options.filename, "utf8");
+  assert.match(app.scheduler.command("cancelmatching", " "), /未取消任何任务/);
+  assert.match(app.scheduler.command("cancelmatching", ".*"), /未找到匹配/);
+  const result = app.scheduler.command("cancelmatching", "喝水");
+  assert.match(result, /匹配到 21 个/);
+  assert.match(result, /只显示前 20 条/);
+  assert.equal(fs.readFileSync(app.options.filename, "utf8"), before);
+  app.scheduler.add("daily 22:00 READ BOOK");
+  assert.match(app.scheduler.command("cancelmatching", "read book"), /已取消/);
+});
+
+test("content cancellation refuses in-flight messages and state failures leave the original task pending", async () => {
+  let complete;
+  const app = fixture({ send: () => new Promise((resolve) => { complete = resolve; }) });
+  app.scheduler.add("daily 09:00 喝水");
+  app.at("2026-10-18 09:00");
+  const ticking = app.scheduler.tick();
+  const result = app.scheduler.command("cancelmatching", "喝水");
+  assert.match(result, /已经开始发送/);
+  assert.equal(app.scheduler.items[0].status, "sending");
+  complete(); await ticking;
+  assert.equal(app.scheduler.items[0].status, "pending");
+  app.scheduler.failed = true;
+  assert.match(app.scheduler.command("cancelmatching", "喝水"), /保存失败/);
+  assert.equal(app.scheduler.items[0].status, "pending");
+});
+
 test("a one-off reminder persists across restart and only sends privately once after the deadline", async () => {
   const app = fixture();
   assert.match(app.scheduler.add("2026-10-18 09:00 喝水"), /已保存/);
@@ -301,6 +390,22 @@ test("Telegram natural reminders enforce private authorization, work while busy 
   assert.match(replies.at(-1), /2026-10-18 21:00（北京时间）/);
   assert.equal(app.scheduler.items.length, 1);
   assert.equal(prompts.length, 1);
+  await handler(message("查看我的提醒"));
+  assert.match(replies.at(-1), /喝水/);
+  await handler(message("查看我的提醒", -100));
+  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
+  await handler(message("取消喝水提醒", -100));
+  assert.match(replies.at(-1), /请在与 Bot 的私聊/);
+  await handler(message("取消喝水提醒", 43, 43));
+  assert.equal(replies.at(-1), "未授权。");
+  await handler(message("取消喝水提醒可以吗"));
+  assert.match(replies.at(-1), /未取消提醒/);
+  assert.equal(app.scheduler.items[0].status, "pending");
+  await handler(message("取消喝水提醒"));
+  assert.match(replies.at(-1), /已取消定时消息/);
+  await handler(message("查看我的提醒"));
+  assert.match(replies.at(-1), /已取消/);
+  assert.equal(prompts.length, 1);
   finish(); await running;
   const discussion = handler(message("/codex 每天晚上9点提醒我喝水"));
   await new Promise((resolve) => setImmediate(resolve));
@@ -329,6 +434,14 @@ test("Discord private natural text uses the same grammar and honors disabled pri
   await dispatch("MESSAGE_CREATE", { ...message, id: "723456789012345678" });
   assert.match(replies.at(-1), /私聊发送已关闭/);
   assert.equal(app.scheduler.items.length, 1);
+  await dispatch("MESSAGE_CREATE", { ...message, id: "823456789012345678", content: "查看我的提醒" });
+  assert.match(replies.at(-1), /喝水/);
+  await dispatch("MESSAGE_CREATE", { ...message, id: "923456789012345678", guild_id: APP, content: "取消喝水提醒" });
+  assert.match(replies.at(-1), /私聊/);
+  assert.equal(app.scheduler.items[0].status, "pending");
+  await dispatch("MESSAGE_CREATE", { ...message, id: "1023456789012345678", content: "取消喝水提醒" });
+  assert.match(replies.at(-1), /已取消/);
+  assert.equal(app.scheduler.items[0].status, "cancelled");
 });
 
 test("Discord native reminders are stored without interaction tokens and later sent via a fresh private Bot message", async () => {
