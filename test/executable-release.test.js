@@ -15,6 +15,7 @@ const identity = { version: "1.7.0", commit: "a".repeat(40), target: "linux-x64"
 async function archive(changes = {}, options = {}) {
   const directory = fs.mkdtempSync(path.join(suite, "case-"));
   const files = ["codex-bot", ".env.example", ".env.discord.example", "deploy/EXECUTABLE.md", "UPGRADE-v1.7.0.md",
+    "MODEL-REMINDERS.md", "deploy/upgrade-v1.8.0.sh",
     "deploy/codex-tg-bot.service.example", "deploy/codex-discord-bot.service.example", "licenses/Node-LICENSE",
     "licenses/dotenv-LICENSE", "licenses/node-telegram-bot-api-LICENSE"];
   const binary = Buffer.alloc(64); binary.write("\x7fELF", 0, "ascii"); binary[4] = 2; binary[5] = 1; binary.writeUInt16LE(62, 18);

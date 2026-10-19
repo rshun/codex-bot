@@ -132,26 +132,30 @@ for (const [label, executable, prefix] of variants) {
 test("embedded schema is materialized once, content-checked and never overwrites conflicting data", t => {
   const sea = require("node:sea");
   const runtime = require("../runtime-paths");
-  const content = fs.readFileSync(path.join(root, "reminder-response.schema.json"));
   t.mock.method(sea, "isSea", () => true);
   t.mock.method(sea, "getAsset", name => {
-    assert.equal(name, "reminder-response.schema.json");
-    return content;
+    assert.ok(["reminder-response.schema.json", "reminder-generation.schema.json"].includes(name));
+    return fs.readFileSync(path.join(root, name));
   });
   const directory = fixture();
   runtime.configureDirectory(directory);
-  const schema = runtime.schemaFile();
-  assert.equal(schema.startsWith(path.join(directory, ".bot-state", "runtime-assets") + path.sep), true);
-  assert.equal(fs.readFileSync(schema, "utf8"), content.toString());
-  assert.equal(runtime.schemaFile(), schema);
-  fs.writeFileSync(schema, "conflicting data");
-  assert.throws(() => runtime.schemaFile(), /schema validation failed/);
-  assert.equal(fs.readFileSync(schema, "utf8"), "conflicting data");
-  const externalState = fixture(), before = snapshot(directory);
-  const externalSchema = runtime.schemaFile(externalState);
-  assert.ok(externalSchema.startsWith(path.join(externalState, "runtime-assets") + path.sep));
-  assert.deepEqual(snapshot(directory), before);
-  assert.equal(runtime.schemaFile(externalState), externalSchema);
+  for (const [name, materialize] of [["reminder-response.schema.json", runtime.schemaFile],
+    ["reminder-generation.schema.json", runtime.generationSchemaFile]]) {
+    const content = fs.readFileSync(path.join(root, name));
+    const schema = materialize();
+    assert.equal(schema.startsWith(path.join(directory, ".bot-state", "runtime-assets") + path.sep), true);
+    assert.equal(path.basename(schema), name);
+    assert.equal(fs.readFileSync(schema, "utf8"), content.toString());
+    assert.equal(materialize(), schema);
+    fs.writeFileSync(schema, "conflicting data");
+    assert.throws(() => materialize(), /schema validation failed/);
+    assert.equal(fs.readFileSync(schema, "utf8"), "conflicting data");
+    const externalState = fixture(), before = snapshot(directory);
+    const externalSchema = materialize(externalState);
+    assert.ok(externalSchema.startsWith(path.join(externalState, "runtime-assets") + path.sep));
+    assert.deepEqual(snapshot(directory), before);
+    assert.equal(materialize(externalState), externalSchema);
+  }
 });
 
 test("executable archive keeps Linux mode 0755 on Windows and does not include unlisted private files", async () => {

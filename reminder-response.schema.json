@@ -12,12 +12,13 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "kind", "time", "text"],
+        "required": ["id", "kind", "time", "text", "generation"],
         "properties": {
           "id": { "type": "string" },
           "kind": { "type": "string", "enum": ["", "once", "daily", "nonworking"] },
           "time": { "type": "string" },
-          "text": { "type": "string" }
+          "text": { "type": "string" },
+          "generation": { "type": "string", "enum": ["", "static", "model"] }
         }
       }
     }

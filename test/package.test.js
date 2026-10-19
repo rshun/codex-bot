@@ -39,6 +39,8 @@ test("release archive is complete, portable and excludes private files and sourc
     }
     for(const name of ['index','discord','discord-client','session-store','usage','quota','codex-runner','semantic-reminders'])require('./'+name);
     const schema=require('./reminder-response.schema.json');
+    if(!schema.properties.entries.items.properties.generation.enum.includes('model')||!require('./reminder-generation').createReminderGenerator||!require('./reminder-generation.schema.json').properties.reply||!fs.existsSync('MODEL-REMINDERS.md'))throw new Error('Model reminder runtime missing');
+    if(!fs.existsSync('UPGRADE-v1.8.0.md')||!fs.existsSync('deploy/upgrade-v1.8.0.sh'))throw new Error('Executable upgrade guide missing');
     if(!schema.properties.action.enum.includes('update')||!fs.existsSync('SEMANTIC-REMINDERS.md')||!fs.existsSync('UPGRADE-v1.6.0.md'))throw new Error('Semantic reminder runtime missing');
     if(!fs.existsSync('deploy/upgrade-v1.6.0.sh')||!fs.existsSync('deploy/UPGRADE-SCRIPT.md'))throw new Error('Standalone updater missing');
     const {parseNaturalReminder}=require('./reminders');

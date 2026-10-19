@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
-const { replaceStateFile } = require("./session-store");
+const { replaceStateFile, MODEL_NAME } = require("./session-store");
 const { ChinaCalendar, CalendarError } = require("./china-calendar");
 
 const DAY = 86400000;
@@ -18,9 +18,10 @@ const HELP = [
   "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
   "修改时间：把喝水提醒改成每天晚上10点、把提醒 任务ID 改成明天 08:30",
   "非工作日多时间：非工作日早上6点1分、11点2分提醒我测试消息（中国大陆调休日历）",
-  "到时发送保存的文字，不调用 Codex。Bot 需保持运行。",
+  "普通提醒到时发送保存的文字；TG 明确要求调用模型时，每次生成一句简短回复再发送。Bot 需保持运行。",
 ].join("\n");
-const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消", calendar_wait: "日历待更新" };
+const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消", calendar_wait: "日历待更新",
+  failed: "模型生成失败", generation_failed: "模型生成失败" };
 const active = (task) => ["pending", "sending", "calendar_wait"].includes(task.status);
 const recurring = (task) => task.kind !== "once";
 const frequency = (task) => task.kind === "nonworking" ? "中国大陆非工作日" : "每天";
@@ -172,6 +173,11 @@ function validISO(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
+function validGeneration(value) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 &&
+    Object.hasOwn(value, "model") && (value.model === null || (typeof value.model === "string" && MODEL_NAME.test(value.model)));
+}
+
 function validTask(task) {
   return task && typeof task === "object" && typeof task.id === "string" && ID.test(task.id) &&
     ["once", "daily", "nonworking"].includes(task.kind) &&
@@ -179,20 +185,21 @@ function validTask(task) {
     typeof task.text === "string" && !!task.text.trim() && task.text.length <= 1000 &&
     validISO(task.nextAt) && validISO(task.createdAt) && Object.hasOwn(LABELS, task.status) &&
     (task.lastAttempt === null || validISO(task.lastAttempt)) &&
-    [null, "sent", "uncertain"].includes(task.lastResult) &&
+    [null, "sent", "uncertain", ...(task.generation ? ["generation_failed"] : [])].includes(task.lastResult) &&
     (task.status !== "sending" || task.lastAttempt !== null) &&
     (recurring(task) ? (["pending", "sending", "cancelled", ...(task.kind === "nonworking" ? ["calendar_wait"] : [])].includes(task.status) &&
-      formatTime(Date.parse(task.nextAt)).slice(11) === task.time) : task.status !== "calendar_wait") &&
+      formatTime(Date.parse(task.nextAt)).slice(11) === task.time) : !["calendar_wait", "generation_failed"].includes(task.status) &&
+      (task.status !== "failed" || (!!task.generation && task.lastResult === "generation_failed"))) &&
     (task.lastResult === null || task.lastAttempt !== null) &&
-    Object.keys(task).length === 9;
+    (Object.hasOwn(task, "generation") ? validGeneration(task.generation) && Object.keys(task).length === 10 : Object.keys(task).length === 9);
 }
 
 class ReminderScheduler {
   constructor({ filename, platform, userId, send, sanitize = (text) => text, enabled = true,
-                now = Date.now, logger = console, timers = { setInterval, clearInterval }, calendarFile, calendar }) {
+                generate, now = Date.now, logger = console, timers = { setInterval, clearInterval }, calendarFile, calendar }) {
     if (!["telegram", "discord"].includes(platform) || !/^[1-9]\d{0,19}$/.test(userId)) throw new ReminderError("configuration");
     this.filename = path.resolve(filename);
-    Object.assign(this, { platform, userId, send, sanitize, enabled, now, logger, timers });
+    Object.assign(this, { platform, userId, send, sanitize, enabled, generate, now, logger, timers });
     this.calendar = calendar || new ChinaCalendar(calendarFile);
     this.items = [];
     this.failed = false;
@@ -203,8 +210,9 @@ class ReminderScheduler {
     try {
       if (fs.statSync(this.filename).size > 2 * 1024 * 1024) throw new Error();
       const data = JSON.parse(fs.readFileSync(this.filename, "utf8"));
-      if (![1, 2].includes(data?.version) || (data.version === 1 && data.items?.some?.(item => item.kind === "nonworking")) || data.platform !== platform || data.userId !== userId ||
+      if (![1, 2, 3].includes(data?.version) || (data.version === 1 && data.items?.some?.(item => item.kind === "nonworking")) || data.platform !== platform || data.userId !== userId ||
           !Array.isArray(data.items) || data.items.length > 500 || data.items.some((item) => !validTask(item)) ||
+          data.items.some(item => item.generation && (data.version !== 3 || platform !== "telegram")) ||
           new Set(data.items.map((item) => item.id)).size !== data.items.length) throw new Error();
       this.items = data.items;
     } catch { throw new ReminderError("state"); }
@@ -215,7 +223,8 @@ class ReminderScheduler {
     try {
       fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
       const temporary = `${this.filename}.${randomUUID()}.tmp`;
-      fs.writeFileSync(temporary, JSON.stringify({ version: items.some(item => item.kind === "nonworking") ? 2 : 1, platform: this.platform,
+      if (!Array.isArray(items) || items.some(item => !validTask(item) || (item.generation && this.platform !== "telegram"))) throw new Error();
+      fs.writeFileSync(temporary, JSON.stringify({ version: items.some(item => item.generation) ? 3 : items.some(item => item.kind === "nonworking") ? 2 : 1, platform: this.platform,
         userId: this.userId, items }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
       replaceStateFile(temporary, this.filename);
       this.items = items;
@@ -285,7 +294,8 @@ class ReminderScheduler {
   list() {
     const lines = [...this.items].reverse().slice(0, 20).map((item) =>
       `${item.id} · ${LABELS[item.status]} · ${recurring(item) ? `${frequency(item)} ${item.time}，${item.status === "calendar_wait" ? "原计划 " : "下次 "}` : ""}${formatTime(Date.parse(item.nextAt))}` +
-      (item.lastResult ? ` · 最近${LABELS[item.lastResult]}` : "") + `\n${item.text}`);
+      (item.lastResult ? ` · 最近${LABELS[item.lastResult]}` : "") +
+      (item.generation ? `\n🤖 触发时调用模型：${item.generation.model || "Codex CLI 默认配置"}；生成一句简短回复\n生成要求：` : "\n") + item.text);
     return [this.failed ? "状态保存失败，定时发送已暂停；请检查权限并重启。" : "定时消息（北京时间，最近 20 条）：",
       ...(!this.enabled ? ["私聊发送已关闭，待发任务暂停。"] : []),
       ...(lines.length ? lines : ["暂无定时消息。"]),
@@ -297,7 +307,7 @@ class ReminderScheduler {
     if (!ID.test(id)) return "用法：/cancelreminder 8位任务ID";
     const task = this.items.find((item) => item.id === id);
     if (!task) return "未找到该定时消息。";
-    if (task.status === "sending") return "本次消息已经开始发送，无法撤回；请稍后取消后续任务。";
+    if (task.status === "sending") return task.generation ? "本次已经开始生成或发送，无法撤回；请稍后取消后续任务。" : "本次消息已经开始发送，无法撤回；请稍后取消后续任务。";
     if (!active(task)) return "该任务已经结束或取消。";
     this.update(id, { status: "cancelled" });
     return `已取消定时消息：${id}`;
@@ -388,18 +398,48 @@ class ReminderScheduler {
             task = this.items.find(item => item.id === task.id);
           }
         }
-        // Save the claim BEFORE sending. A crash or an ambiguous network result must not cause a duplicate.
+        // One scheduled model call at a time; ordinary text reminders remain
+        // deliverable while it is waiting, including on subsequent timer ticks.
+        if (task.generation && this.modelRun) continue;
+        // Persist the claim BEFORE generation/sending. Never replay an occurrence
+        // after a crash or ambiguous delivery, including an in-flight model call.
         this.update(task.id, { status: "sending", lastAttempt: new Date(this.now()).toISOString() });
-        let result = "sent";
-        try {
-          await this.send(this.userId, `⏰ 定时消息 · ${task.id}\n计划时间：${formatTime(Date.parse(task.nextAt))}（北京时间）\n${this.sanitize(task.text)}`);
-        } catch { result = "uncertain"; this.logger.error("Reminder delivery failed or unconfirmed."); }
-        this.update(task.id, { ...(recurring(task) ? this.future(task, Math.max(this.now(), Date.parse(task.nextAt))) : { status: result }), lastResult: result });
+        if (task.generation) {
+          this.modelRun = this.deliver(task).catch(() => {
+            this.failed = true;
+            this.logger.error("Reminder state persistence failed; scheduler paused.");
+          }).finally(() => { this.modelRun = undefined; });
+        } else await this.deliver(task);
       }
     } catch {
       this.failed = true;
       this.logger.error("Reminder state persistence failed; scheduler paused.");
     } finally { this.ticking = false; }
+  }
+
+  async deliver(task) {
+    let result = "sent", text = task.text;
+    if (task.generation) {
+      try {
+        if (this.platform !== "telegram" || typeof this.generate !== "function") throw new Error();
+        text = await this.generate({ ...task, generation: { ...task.generation } });
+        if (this.failed || this.stopping || typeof text !== "string" || !text.trim() || text.length > 4000) throw new Error();
+        text = this.sanitize(text).replace(/[\s\x00-\x1f\x7f]+/g, " ").trim();
+        if (!text) throw new Error();
+        const characters = Array.from(text);
+        if (characters.length > 120) text = characters.slice(0, 119).join("") + "…";
+      } catch {
+        result = "generation_failed";
+        this.logger.error("Reminder model generation failed; no message sent.");
+      }
+    }
+    if (result === "sent") {
+      try {
+        await this.send(this.userId, `⏰ 定时消息 · ${task.id}\n计划时间：${formatTime(Date.parse(task.nextAt))}（北京时间）\n${task.generation ? text : this.sanitize(text)}`);
+      } catch { result = "uncertain"; this.logger.error("Reminder delivery failed or unconfirmed."); }
+    }
+    this.update(task.id, { ...(recurring(task) ? this.future(task, Math.max(this.now(), Date.parse(task.nextAt)))
+      : { status: result === "generation_failed" ? "failed" : result }), lastResult: result });
   }
 
   start() {
