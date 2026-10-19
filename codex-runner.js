@@ -2,12 +2,26 @@ const { spawn } = require("node:child_process");
 const { THREAD_ID, MODEL_NAME } = require("./session-store");
 const { normalizeUsage } = require("./usage");
 
-function buildArgs({ threadId, model, outputSchema }) {
+function buildArgs({ threadId, model, outputSchema, generationOnly = false, disabledMcpServers = [] }) {
   if (threadId && !THREAD_ID.test(threadId)) throw new Error("Invalid thread ID");
   if (model && !MODEL_NAME.test(model)) throw new Error("Invalid model name");
   const args = ["exec"];
   if (threadId) args.push("resume");
   args.push("--json", "--skip-git-repo-check");
+  if (generationOnly) {
+    if (threadId || !Array.isArray(disabledMcpServers) || disabledMcpServers.length > 200 ||
+        disabledMcpServers.some(server => !server || !/^[A-Za-z0-9_-]{1,128}$/.test(server.name) ||
+          !["stdio", "streamable_http"].includes(server.transport))) throw new Error("Invalid generation invocation");
+    args.push("--sandbox", "read-only", "--ephemeral", "-c", 'approval_policy="never"', "-c", 'web_search="disabled"');
+    for (const feature of ["shell_tool", "hooks", "plugins", "apps", "multi_agent"]) args.push("--disable", feature);
+    for (const server of disabledMcpServers) {
+      // A flag-only override can replace a bootstrap server table and lose its
+      // required transport. Supply a disabled stub of the same transport kind;
+      // never copy real commands, URLs, environment values or headers into argv.
+      const transport = server.transport === "stdio" ? 'command="__codex_bot_disabled_mcp__"' : 'url="http://127.0.0.1:9"';
+      args.push("-c", `mcp_servers.${server.name}={${transport},enabled=false,required=false}`);
+    }
+  }
   if (model) args.push("--model", model);
   if (outputSchema) args.push("--output-schema", outputSchema);
   if (threadId) args.push(threadId);
@@ -16,16 +30,19 @@ function buildArgs({ threadId, model, outputSchema }) {
   return args;
 }
 
-function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThread, outputSchema }, spawnProcess = spawn) {
+function codexEnvironment(env) {
+  const childEnv = { ...env };
+  for (const key of ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USER_ID", "ALLOWED_USER_ID"]) delete childEnv[key];
+  return childEnv;
+}
+
+function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThread, outputSchema,
+    generationOnly = false, disabledMcpServers = [] }, spawnProcess = spawn) {
   return new Promise((resolve) => {
     let child;
-    const childEnv = { ...env };
-    delete childEnv.TELEGRAM_BOT_TOKEN;
-    delete childEnv.DISCORD_BOT_TOKEN;
-    delete childEnv.DISCORD_ALLOWED_USER_ID;
-    delete childEnv.ALLOWED_USER_ID;
+    const childEnv = codexEnvironment(env);
     try {
-      child = spawnProcess(bin, buildArgs({ threadId, model, outputSchema }), {
+      child = spawnProcess(bin, buildArgs({ threadId, model, outputSchema, generationOnly, disabledMcpServers }), {
         cwd: workdir, env: childEnv, shell: false, stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {
@@ -119,4 +136,4 @@ function runCodex({ bin, workdir, env, prompt, threadId, model, timeoutMs, onThr
   });
 }
 
-module.exports = { buildArgs, runCodex };
+module.exports = { buildArgs, runCodex, codexEnvironment };

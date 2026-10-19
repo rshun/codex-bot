@@ -11,8 +11,8 @@ const ROOT = path.resolve(__dirname, "..");
 const NODE_VERSION = "24.19.0";
 const TOOLS = { esbuild: "0.28.2", postject: "1.0.0-alpha.6" };
 const RUNTIME = ["bot.js", "runtime-paths.js", "index.js", "discord.js", "discord-client.js", "codex-runner.js",
-  "session-store.js", "usage.js", "quota.js", "reminders.js", "semantic-reminders.js", "china-calendar.js", "package.json"];
-const ASSETS = ["china-calendar.json", "reminder-response.schema.json"];
+  "session-store.js", "usage.js", "quota.js", "reminders.js", "semantic-reminders.js", "china-calendar.js", "reminder-generation.js", "package.json"];
+const ASSETS = ["china-calendar.json", "reminder-response.schema.json", "reminder-generation.schema.json"];
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 
 function safeOutput(output, root) {
@@ -167,7 +167,7 @@ async function buildExecutable({ root = ROOT, output, target = `${process.platfo
     manifest.files[relative] = hash(content);
   };
   manifest.files[binaryName] = hash(fs.readFileSync(executable));
-  for (const relative of [".env.example", ".env.discord.example", "deploy/EXECUTABLE.md", `UPGRADE-v${pkg.version}.md`]) {
+  for (const relative of [".env.example", ".env.discord.example", "deploy/EXECUTABLE.md", "MODEL-REMINDERS.md", `UPGRADE-v${pkg.version}.md`, "deploy/upgrade-v1.8.0.sh"]) {
     write(relative, fs.readFileSync(path.join(root, relative)));
   }
   write("licenses/Node-LICENSE", licenseContent);

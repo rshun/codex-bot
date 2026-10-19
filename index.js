@@ -7,6 +7,7 @@ const { formatUsage } = require("./usage");
 const { queryQuota, formatQuota } = require("./quota");
 const { ReminderScheduler } = require("./reminders");
 const { prepareTurn, parseResponse, applyResponse } = require("./semantic-reminders");
+const { createReminderGenerator } = require("./reminder-generation");
 
 function loadConfig(env, { platform = "telegram" } = {}) {
   if (!["telegram", "discord"].includes(platform)) throw new Error("无效的平台配置。");
@@ -96,6 +97,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
     "/remind YYYY-MM-DD HH:mm 内容 — 指定时间私聊提醒（北京时间）",
     "/remind daily HH:mm 内容 — 每天私聊提醒",
     "也可直接说：每天晚上9点提醒我喝水（北京时间，仅私聊）",
+    ...(config.platform === "discord" ? [] : ["模型提醒：每天早上9点调用模型生成一句简短早安问候并发给我"]),
     "/reminders — 查看定时消息（仅私聊）",
     "/cancelreminder 任务ID — 取消定时消息（仅私聊）",
     "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
@@ -207,7 +209,7 @@ function createMessageHandler({ bot, store, config, botUsername = "", runner = r
       } catch { logger.warn("Message reaction failed."); }
       const turn = reminders ? prepareTurn({ scheduler: reminders, text: prompt, privateChat,
         allowActions: name !== "codex", receipt: session.reminderReceipt || "", redact,
-        schemaDirectory: path.dirname(config.sessionFile) }) : null;
+        schemaDirectory: path.dirname(config.sessionFile), model: selectedModel }) : null;
       const result = await runner({
         bin: config.bin, workdir: config.workdir, env: { ...config.env, CODEX_HOME: config.codexHome },
         prompt: turn ? turn.prompt : prompt, threadId: session.threadId, model: selectedModel, timeoutMs: config.timeoutMs,
@@ -284,6 +286,7 @@ async function startBot() {
   try {
     reminders = new ReminderScheduler({ filename: config.reminderFile, platform: "telegram",
       userId: config.allowedUserId, sanitize: createRedactor(config.env), calendarFile: config.calendarFile,
+      generate: createReminderGenerator(config),
       send: (userId, text) => bot.sendMessage(userId, text) });
   } catch { console.error("Telegram reminder state/calendar failed; check REMINDER_FILE and HOLIDAY_CALENDAR_FILE."); process.exitCode = 1; return; }
   bot.on("polling_error", () => console.error("Telegram polling failed; check connection and bot configuration."));

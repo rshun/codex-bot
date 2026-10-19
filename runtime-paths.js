@@ -4,7 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const sea = require("node:sea");
 
 let directory;
-const ASSETS = new Set(["china-calendar.json", "reminder-response.schema.json"]);
+const ASSETS = new Set(["china-calendar.json", "reminder-response.schema.json", "reminder-generation.schema.json"]);
 
 function configureDirectory(value) {
   const resolved = fs.realpathSync(path.resolve(value));
@@ -22,9 +22,10 @@ function readAsset(name) {
 
 // Codex is a separate process and needs a real --output-schema file. Only this
 // public, embedded asset is materialized; configuration and user state stay external.
-function schemaFile(stateDirectory = path.join(dataDirectory(), ".bot-state")) {
-  if (!sea.isSea()) return path.join(__dirname, "reminder-response.schema.json");
-  const content = readAsset("reminder-response.schema.json");
+function assetFile(name, stateDirectory = path.join(dataDirectory(), ".bot-state")) {
+  if (!ASSETS.has(name)) throw new Error("Unknown runtime asset.");
+  if (!sea.isSea()) return path.join(__dirname, name);
+  const content = readAsset(name);
   const digest = createHash("sha256").update(content).digest("hex");
   // Use the existing state location, so a read-only config directory remains
   // usable when SESSION_FILE/REMINDER_FILE point at a separate writable volume.
@@ -39,7 +40,7 @@ function schemaFile(stateDirectory = path.join(dataDirectory(), ".bot-state")) {
       throw new Error("Runtime asset directory permissions invalid.");
     }
   }
-  const filename = path.join(parent, "reminder-response.schema.json");
+  const filename = path.join(parent, name);
   try { fs.lstatSync(filename); }
   catch (error) {
     if (error.code !== "ENOENT") throw error;
@@ -72,4 +73,6 @@ function checkLocalPaths(config) {
   } catch { throw new Error("Local paths or permissions invalid; check WORKDIR, CODEX_BIN and state paths."); }
 }
 
-module.exports = { configureDirectory, dataDirectory, defaultCalendarFile, readAsset, schemaFile, checkLocalPaths };
+const schemaFile = directory => assetFile("reminder-response.schema.json", directory);
+const generationSchemaFile = directory => assetFile("reminder-generation.schema.json", directory);
+module.exports = { configureDirectory, dataDirectory, defaultCalendarFile, readAsset, schemaFile, generationSchemaFile, checkLocalPaths };
