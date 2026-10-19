@@ -39,7 +39,7 @@ test("every wording uses the same schema envelope rather than a keyword or phras
     assert.match(turn.prompt, /不依赖特定关键词或语序/);
   }
   const schema = JSON.parse(fs.readFileSync(outputSchema));
-  assert.deepEqual(schema.properties.action.enum, ["chat", "clarify", "list", "create", "update", "cancel"]);
+  assert.deepEqual(schema.properties.action.enum, ["chat", "clarify", "list", "create", "update", "cancel", "pause", "resume"]);
   for (const threadId of [null, "00000000-0000-0000-0000-000000000001"]) {
     const args = buildArgs({ threadId, outputSchema });
     assert.equal(args[args.indexOf("--output-schema") + 1], outputSchema);

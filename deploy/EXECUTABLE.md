@@ -19,7 +19,7 @@ BIN=/home/codex/codex-tg-bot/releases/实际版本目录/codex-bot
 "$BIN" discord --config-dir "$BOT_DIR" --check-config
 ```
 
-检查只读取配置、会话、提醒、日历和本地权限，不连接平台、不调用模型、不写状态。它不能证明令牌、Codex 登录或网络可用。旧状态无需清空；状态损坏或 `WORKDIR`/`CODEX_HOME` 不匹配时拒绝运行。v1.8.0 的模型提醒会写入旧版不兼容的版本3提醒数据，完整双服务升级与回滚检查见 [v1.8.0说明](../UPGRADE-v1.8.0.md)。
+检查只读取配置、会话、提醒、日历和本地权限，不连接平台、不调用模型、不写状态。它不能证明令牌、Codex 登录或网络可用。旧状态无需清空；状态损坏或 `WORKDIR`/`CODEX_HOME` 不匹配时拒绝运行。v1.8.0模型提醒使用版本3；v1.9.0暂停任务使用版本4，旧v1.8.0无法直接读取版本4。完整双服务升级、ExecStart核对与回滚检查见 [v1.9.0说明](../UPGRADE-v1.9.0.md)。
 
 调试启动命令如下。已有 systemd 实例运行时不要同时启动同平台的第二个实例，否则可能重复消费消息或写同一份状态。
 
@@ -147,7 +147,7 @@ sudo systemctl restart codex-discord-bot.service
 systemctl is-active codex-discord-bot.service
 ```
 
-仅含普通提醒的版本1/2文件回滚到同一状态格式的 v1.6.0 Node 包不需要转换数据；启用模型提醒后的版本3不能由v1.7.0及更早程序直接读取，必须保留最新数据并先明确处理兼容性。更早版本的日历提醒兼容性需另行核实。现有 `upgrade-v1.6.0.sh` 是固定 SHA 的 **Node 发布包升级器**，不会自动升级为可执行版本，不能拿它安装可执行包。
+仅含普通提醒的版本1/2文件回滚到同一状态格式的 v1.6.0 Node 包不需要转换数据；启用模型提醒后的版本3不能由v1.7.0及更早程序直接读取，必须保留最新数据并先明确处理兼容性。存在暂停任务的版本4不能由v1.8.0及更早程序读取，回滚检查必须接受当前数据，不能擅自恢复/取消暂停任务或丢弃新数据。更早版本的日历提醒兼容性需另行核实。现有 `upgrade-v1.6.0.sh` 是固定 SHA 的 **Node 发布包升级器**，不会自动升级为可执行版本，不能拿它安装可执行包。
 
 ## 构建
 
@@ -155,7 +155,7 @@ systemctl is-active codex-discord-bot.service
 
 工作流为 [build-executable.yml](../.github/workflows/build-executable.yml)。推送 `codex/debian-executable` 分支会自动构建；版本标签推送和手动 `workflow_dispatch` 也支持。只有当该工作流已经进入默认分支后，GitHub 才会显示相应手动运行入口。默认只生成 Actions artifacts；在版本标签上手动运行并明确勾选 `publish_release` 时，才验证标签/版本/源提交与包内全部哈希、创建草稿、下载比对附件并发布 GitHub Release。工作流不部署服务器。
 
-两个原生 runner 分别构建 `linux-x64`、`linux-arm64`，临时安装锁定的现有运行依赖及隔离构建工具，运行完整回归，验证归档校验值，再运行提取后的程序。另用固定镜像摘要的 Debian 12 容器检查两个平台入口：镜像含系统基础库，不含 Node/npm；校验时关闭网络、使用只读系统，并以测试数据所有者的 UID/GID 读取合成的旧配置、会话、Discord v2和TG v3提醒。检查前后对比数据字节，不接入真实 Bot 或模型。所有安装只发生在 GitHub 临时 runner 中。
+两个原生 runner 分别构建 `linux-x64`、`linux-arm64`，临时安装锁定的现有运行依赖及隔离构建工具，运行完整回归，验证归档校验值，再运行提取后的程序。另用固定镜像摘要的 Debian 12 容器检查两个平台入口：镜像含系统基础库，不含 Node/npm；校验时关闭网络、使用只读系统，并以测试数据所有者的 UID/GID 读取合成的旧配置、会话、TG和Discord的v4暂停提醒及TG模型选择。检查前后对比数据字节，不接入真实 Bot 或模型。所有安装只发生在 GitHub 临时 runner 中。
 
 在仓库 Actions 的 **Build Debian executables** 成功运行页面，下载 `codex-bot-linux-x64` 或 `codex-bot-linux-arm64` artifact。GitHub 下载的是 ZIP，解开后有运行包 `.tar.gz` 和 `SHA256SUMS`；再按本文校验和部署。Artifacts 保留 30 天，长期下载入口需后续正式发布到 Release。
 

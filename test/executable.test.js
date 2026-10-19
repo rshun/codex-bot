@@ -37,7 +37,7 @@ function snapshot(directory) {
   return files;
 }
 
-function prepare() {
+function prepare({ paused = false } = {}) {
   const directory = fixture();
   const workdir = path.join(directory, "workspace"), codexHome = path.join(directory, "codex-home");
   fs.mkdirSync(workdir); fs.mkdirSync(codexHome);
@@ -54,6 +54,8 @@ function prepare() {
     const reminders = new ReminderScheduler({ filename: path.join(path.dirname(filename), `${platform}-reminders.json`),
       platform, userId: platform === "telegram" ? "42" : "43", now: () => Date.parse("2026-10-09T20:00:00+08:00") });
     reminders.addBatch({ kind: "nonworking", times: ["06:01", "11:02"], text: "测试消息" });
+    if (paused) reminders.persist(reminders.items.map((task, index) => index === 1 ? { ...task, status: "paused" }
+      : platform === "telegram" ? { ...task, generation: { model: "test-model" } } : task));
   }
   const common = Object.entries(env).filter(([key]) => !/TOKEN|USER_ID/.test(key));
   for (const [platform, filename, entries] of [["telegram", ".env", ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID"]],
@@ -110,6 +112,19 @@ for (const [label, executable, prefix] of variants) {
     assert.equal(invalid.status, 1);
     assert.equal(fs.readFileSync(corrupted, "utf8"), content);
     assert.doesNotMatch(invalid.stderr, /synthetic_|bad model/);
+  });
+
+  test(`${label}: both modes preserve v4 paused reminders and TG model selection during read-only checks`, () => {
+    const app = prepare({ paused: true }), before = snapshot(app.directory);
+    for (const platform of ["telegram", "discord"]) {
+      const filename = path.join(app.directory, ".bot-state", `${platform}-reminders.json`);
+      const data = JSON.parse(fs.readFileSync(filename));
+      assert.equal(data.version, 4); assert.equal(data.items[1].status, "paused");
+      if (platform === "telegram") assert.equal(data.items[0].generation.model, "test-model");
+      const result = run([platform, "--config-dir", app.directory, "--check-config"], fixture());
+      assert.equal(result.status, 0, result.stderr);
+    }
+    assert.deepEqual(snapshot(app.directory), before);
   });
 
   test(`${label}: explicit state/calendar paths and inherited environment take precedence`, () => {

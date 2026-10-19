@@ -38,8 +38,8 @@ if (process.argv[2] === "prepare" && process.argv.length === 3) {
     const reminders = new ReminderScheduler({ filename: path.join(directory, ".bot-state", `${platform}-reminders.json`),
       platform, userId: id, now: () => Date.parse("2026-10-09T20:00:00+08:00") });
     reminders.addBatch({ kind: "nonworking", times: ["06:01", "11:02"], text: "测试消息" });
-    if (platform === "telegram") reminders.persist(reminders.items.map((task, index) =>
-      index === 0 ? { ...task, generation: { model: "test-model" } } : task));
+    reminders.persist(reminders.items.map((task, index) =>
+      index === 1 ? { ...task, status: "paused" } : platform === "telegram" ? { ...task, generation: { model: "test-model" } } : task));
     fs.writeFileSync(path.join(directory, envFile), `${tokenField}=synthetic_bot_credential\n${idField}=${id}\n` +
       "WORKDIR=/fixture/workspace\nCODEX_HOME=/fixture/codex-home\nCODEX_BIN=/bin/true\n");
   }

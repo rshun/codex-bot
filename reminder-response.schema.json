@@ -4,7 +4,7 @@
   "required": ["nonce", "action", "message", "delivery", "entries"],
   "properties": {
     "nonce": { "type": "string" },
-    "action": { "type": "string", "enum": ["chat", "clarify", "list", "create", "update", "cancel"] },
+    "action": { "type": "string", "enum": ["chat", "clarify", "list", "create", "update", "cancel", "pause", "resume"] },
     "message": { "type": "string" },
     "delivery": { "type": "string", "enum": ["current", "other"] },
     "entries": {
