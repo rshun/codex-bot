@@ -37,7 +37,7 @@ function verifyArchive(compressed, { target, version, commit }) {
     if (!files.has(name) || hash(files.get(name)) !== digest) throw new Error("manifest_hash");
   }
   for (const required of ["codex-bot", ".env.example", ".env.discord.example", "deploy/EXECUTABLE.md", `UPGRADE-v${version}.md`,
-    "MODEL-REMINDERS.md", "deploy/upgrade-v1.8.0.sh",
+    "MODEL-REMINDERS.md", "SEMANTIC-REMINDERS.md", `deploy/upgrade-v${version}.sh`,
     "deploy/codex-tg-bot.service.example", "deploy/codex-discord-bot.service.example",
     "licenses/Node-LICENSE", "licenses/dotenv-LICENSE", "licenses/node-telegram-bot-api-LICENSE"]) {
     if (!files.has(required)) throw new Error("required_file");
@@ -69,7 +69,7 @@ function prepareRelease({ root = path.resolve(__dirname, ".."), tag = process.en
   fs.writeFileSync(path.join(output, "SHA256SUMS"), packages.map(item => item.checksum).join("\n") + "\n", { flag: "wx" });
   const guide = `UPGRADE-v${version}.md`;
   fs.copyFileSync(path.join(root, guide), path.join(output, guide), fs.constants.COPYFILE_EXCL);
-  const upgrader = "upgrade-v1.8.0.sh";
+  const upgrader = `upgrade-v${version}.sh`;
   const upgradeContent = fs.readFileSync(path.join(root, "deploy", upgrader));
   fs.writeFileSync(path.join(output, upgrader), upgradeContent, { flag: "wx" });
   fs.appendFileSync(path.join(output, "SHA256SUMS"), `${hash(upgradeContent)}  ${upgrader}\n`);

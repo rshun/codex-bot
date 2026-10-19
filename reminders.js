@@ -13,16 +13,17 @@ const HELP = [
   "/remind YYYY-MM-DD HH:mm 内容 — 指定日期发送一次",
   "/remind daily HH:mm 内容 — 每天发送",
   "也可直接说：每天晚上9点提醒我喝水、明天早上8点半提醒我吃早餐",
-  "/reminders — 查看任务及最近发送结果",
+  "/reminders — 查看全部任务、当前状态及最近发送结果",
   "/cancelreminder 任务ID — 取消待发任务",
   "也可说：查看我的提醒、取消喝水提醒、取消提醒 任务ID",
+  "暂停/恢复：暂停喝水提醒、恢复喝水提醒；循环提醒恢复后不补发暂停期间的消息。",
   "修改时间：把喝水提醒改成每天晚上10点、把提醒 任务ID 改成明天 08:30",
   "非工作日多时间：非工作日早上6点1分、11点2分提醒我测试消息（中国大陆调休日历）",
   "普通提醒到时发送保存的文字；TG 明确要求调用模型时，每次生成一句简短回复再发送。Bot 需保持运行。",
 ].join("\n");
-const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消", calendar_wait: "日历待更新",
+const LABELS = { pending: "待发送", sending: "发送中", sent: "已发送", uncertain: "发送未确认", cancelled: "已取消", calendar_wait: "日历待更新", paused: "已暂停",
   failed: "模型生成失败", generation_failed: "模型生成失败" };
-const active = (task) => ["pending", "sending", "calendar_wait"].includes(task.status);
+const active = (task) => ["pending", "sending", "calendar_wait", "paused"].includes(task.status);
 const recurring = (task) => task.kind !== "once";
 const frequency = (task) => task.kind === "nonworking" ? "中国大陆非工作日" : "每天";
 
@@ -187,7 +188,7 @@ function validTask(task) {
     (task.lastAttempt === null || validISO(task.lastAttempt)) &&
     [null, "sent", "uncertain", ...(task.generation ? ["generation_failed"] : [])].includes(task.lastResult) &&
     (task.status !== "sending" || task.lastAttempt !== null) &&
-    (recurring(task) ? (["pending", "sending", "cancelled", ...(task.kind === "nonworking" ? ["calendar_wait"] : [])].includes(task.status) &&
+    (recurring(task) ? (["pending", "sending", "cancelled", "paused", ...(task.kind === "nonworking" ? ["calendar_wait"] : [])].includes(task.status) &&
       formatTime(Date.parse(task.nextAt)).slice(11) === task.time) : !["calendar_wait", "generation_failed"].includes(task.status) &&
       (task.status !== "failed" || (!!task.generation && task.lastResult === "generation_failed"))) &&
     (task.lastResult === null || task.lastAttempt !== null) &&
@@ -210,9 +211,9 @@ class ReminderScheduler {
     try {
       if (fs.statSync(this.filename).size > 2 * 1024 * 1024) throw new Error();
       const data = JSON.parse(fs.readFileSync(this.filename, "utf8"));
-      if (![1, 2, 3].includes(data?.version) || (data.version === 1 && data.items?.some?.(item => item.kind === "nonworking")) || data.platform !== platform || data.userId !== userId ||
+      if (![1, 2, 3, 4].includes(data?.version) || (data.version === 1 && data.items?.some?.(item => item.kind === "nonworking")) || data.platform !== platform || data.userId !== userId ||
           !Array.isArray(data.items) || data.items.length > 500 || data.items.some((item) => !validTask(item)) ||
-          data.items.some(item => item.generation && (data.version !== 3 || platform !== "telegram")) ||
+          data.items.some(item => (item.generation && (data.version < 3 || platform !== "telegram")) || (item.status === "paused" && data.version !== 4)) ||
           new Set(data.items.map((item) => item.id)).size !== data.items.length) throw new Error();
       this.items = data.items;
     } catch { throw new ReminderError("state"); }
@@ -224,7 +225,7 @@ class ReminderScheduler {
       fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
       const temporary = `${this.filename}.${randomUUID()}.tmp`;
       if (!Array.isArray(items) || items.some(item => !validTask(item) || (item.generation && this.platform !== "telegram"))) throw new Error();
-      fs.writeFileSync(temporary, JSON.stringify({ version: items.some(item => item.generation) ? 3 : items.some(item => item.kind === "nonworking") ? 2 : 1, platform: this.platform,
+      fs.writeFileSync(temporary, JSON.stringify({ version: items.some(item => item.status === "paused") ? 4 : items.some(item => item.generation) ? 3 : items.some(item => item.kind === "nonworking") ? 2 : 1, platform: this.platform,
         userId: this.userId, items }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
       replaceStateFile(temporary, this.filename);
       this.items = items;
@@ -278,7 +279,7 @@ class ReminderScheduler {
     const original = (daily ? daily[2] : once[2]).trim();
     if (!original || original.length > 1000) return "提醒内容须为 1–1000 个字符。";
     if (this.items.length >= 500 || this.items.filter(active).length >= 50) {
-      return "任务数量已达上限（50 个待发任务、500 条总记录），请先取消不需要的任务；总记录满时联系维护者备份归档。";
+      return "任务数量已达上限（50 个未结束任务，包含已暂停任务；500 条总记录），请先取消不需要的任务；总记录满时联系维护者备份归档。";
     }
     const text = this.sanitize(original);
     if (!text.trim() || text.length > 1000) return "脱敏后的提醒内容过长，请缩短内容。";
@@ -292,14 +293,19 @@ class ReminderScheduler {
   }
 
   list() {
-    const lines = [...this.items].reverse().slice(0, 20).map((item) =>
-      `${item.id} · ${LABELS[item.status]} · ${recurring(item) ? `${frequency(item)} ${item.time}，${item.status === "calendar_wait" ? "原计划 " : "下次 "}` : ""}${formatTime(Date.parse(item.nextAt))}` +
+    const counts = Object.keys(LABELS).filter(status => this.items.some(item => item.status === status))
+      .map(status => `${LABELS[status]} ${this.items.filter(item => item.status === status).length}`);
+    const lines = [...this.items].reverse().map((item) =>
+      `${item.id} · ${item.status === "sending" && item.generation ? "生成/发送中" : LABELS[item.status]} · ${recurring(item) ? `${frequency(item)} ${item.time}，` : "单次，"}` +
+      `${["paused", "calendar_wait", "cancelled", "sent", "uncertain", "failed"].includes(item.status) ? "原计划 " : "下次 "}${formatTime(Date.parse(item.nextAt))}` +
       (item.lastResult ? ` · 最近${LABELS[item.lastResult]}` : "") +
-      (item.generation ? `\n🤖 触发时调用模型：${item.generation.model || "Codex CLI 默认配置"}；生成一句简短回复\n生成要求：` : "\n") + item.text);
-    return [this.failed ? "状态保存失败，定时发送已暂停；请检查权限并重启。" : "定时消息（北京时间，最近 20 条）：",
+      (item.generation ? `\n🤖 触发时调用模型：${item.generation.model || "Codex CLI 默认配置"}；生成一句简短回复\n生成要求：` : "\n固定文字：") + item.text);
+    return ["定时消息（北京时间，全部记录）：", `共 ${this.items.length} 条${counts.length ? "；" + counts.join("，") : ""}`,
+      ...(this.failed ? ["状态保存失败，定时发送已暂停；请检查权限并重启。"] : []),
       ...(!this.enabled ? ["私聊发送已关闭，待发任务暂停。"] : []),
       ...(lines.length ? lines : ["暂无定时消息。"]),
       ...(this.items.some(item => item.status === "calendar_wait") ? ["非工作日任务因日历未覆盖而暂停；请更新 HOLIDAY_CALENDAR_FILE 指向的日历（或升级内置日历）后重启，恢复时只安排未来时间。"] : []),
+      ...(this.items.some(item => item.status === "paused") ? ["已暂停任务不发送、不调用模型；恢复循环任务仅安排未来时间，过期单次任务需指定新时间。"] : []),
       "发送未确认的那一轮不会自动重发；可先检查私聊记录。"].join("\n");
   }
 
@@ -353,8 +359,9 @@ class ReminderScheduler {
     if (task.status === "sending") return "该提醒已经开始发送，暂时不能修改；请等本次完成后再修改后续时间。";
     if (!active(task)) return "该提醒已经结束或取消，不能修改；请新建提醒。";
     const previous = `${recurring(task) ? `${frequency(task)} ${task.time}；计划 ` : ""}${formatTime(Date.parse(task.nextAt))}`;
-    this.update(task.id, { kind: repeat ? repeat[1] : "once", time: repeat ? repeat[2] : null, nextAt: new Date(next).toISOString(), status: "pending" });
-    return `已修改定时消息：${task.id}\n原计划：${previous}（北京时间）\n新计划：${repeat ? `${repeat[1] === "nonworking" ? "中国大陆非工作日" : "每天"} ${repeat[2]}；下次 ` : ""}${formatTime(next)}（北京时间）\n内容：${task.text}`;
+    this.update(task.id, { kind: repeat ? repeat[1] : "once", time: repeat ? repeat[2] : null, nextAt: new Date(next).toISOString(), status: task.status === "paused" ? "paused" : "pending" });
+    return `已修改定时消息：${task.id}\n原计划：${previous}（北京时间）\n新计划：${repeat ? `${repeat[1] === "nonworking" ? "中国大陆非工作日" : "每天"} ${repeat[2]}；下次 ` : ""}${formatTime(next)}（北京时间）\n内容：${task.text}` +
+      (task.status === "paused" ? "\n状态：已暂停，未恢复调度。" : "");
   }
 
   command(name, argument) {
