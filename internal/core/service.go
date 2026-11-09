@@ -1,0 +1,914 @@
+package core
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/rshun/codex-bot/internal/actions"
+	"github.com/rshun/codex-bot/internal/codex"
+	"github.com/rshun/codex-bot/internal/media"
+	"github.com/rshun/codex-bot/internal/platform"
+	"github.com/rshun/codex-bot/internal/sandbox"
+	"github.com/rshun/codex-bot/internal/schedule"
+	"github.com/rshun/codex-bot/internal/store"
+)
+
+// emptyReplyText is shown when a turn finishes without any answer text.
+const emptyReplyText = "处理失败：没有得到回复。"
+
+// Engine is the Codex subscription surface used by the chat core.
+type Engine interface {
+	Reply(ctx context.Context, opts codex.ReplyOptions) (codex.HeadlessResult, error)
+	Models(ctx context.Context) (codex.ModelList, error)
+	Allowance(ctx context.Context) (codex.Allowance, error)
+}
+
+// Service accepts chat messages, keeps per-chat context, and answers commands.
+type Service struct {
+	Store  *store.Store
+	Engine Engine
+	// AllowedUsers maps a platform name to the user IDs that may talk to the bot there.
+	AllowedUsers map[string]map[string]struct{}
+	QueueLimit   int
+	Version      string
+	// WebSearch lets Codex search the web and open pages during chat turns.
+	WebSearch bool
+	// DisableLinkPrefetch turns off automatic URL / GitHub / X / webpage pre-fetching in user messages.
+	DisableLinkPrefetch bool
+	// LinkFetcher overrides the built-in SSRF-safe URL fetcher when non-nil (primarily for testing).
+	LinkFetcher func(ctx context.Context, rawURL string) (string, error)
+	// AllowShell is the default shell execution setting when not overridden via /shell.
+	AllowShell bool
+	// UploadDir is where user-uploaded document attachments are saved for Codex to inspect.
+	UploadDir string
+	// MediaDir is the bot-managed directory (<DATA_DIR>/media) for standard pronunciation audio and downloaded web images.
+	MediaDir string
+	// Synthesizer overrides the default pronunciation synthesizer when non-nil (primarily for testing).
+	Synthesizer *media.Synthesizer
+	// MediaHTTP overrides the SSRF-safe HTTP client used for pronunciation and web image fetches when non-nil.
+	MediaHTTP *http.Client
+	// ImageAuditor is the post-generation / pre-send visual compliance review hook.
+	// Defaults to media.NoopImageAuditor{} placeholder when nil.
+	ImageAuditor media.ImageAuditor
+	// Sandbox limits file access for new sessions; nil turns file tools off.
+	Sandbox *sandbox.Manager
+	// Actions is the local MCP server for per-turn chat actions; nil means no MCP channel.
+	Actions *actions.Server
+	// Senders post scheduled task results to a chat, keyed by platform name.
+	Senders         map[string]platform.Replier
+	Location        *time.Location
+	TaskLimit       int
+	TaskMinInterval time.Duration
+	// ScriptDirs are the only directories whose scripts may be bound to script tasks.
+	ScriptDirs []string
+	// ScriptTimeout bounds one script task run; 0 means 30 minutes.
+	ScriptTimeout time.Duration
+	// ScriptLogDir keeps each script task's full output (<DATA_DIR>/task-logs).
+	ScriptLogDir string
+	// ScriptEnv are extra KEY=VALUE entries for script tasks (e.g. CODEX_BOT_BIN, GROK_BOT_BIN, BOT_ENV_FILE).
+	ScriptEnv []string
+	// Scheduler syncs scheduled tasks into the host OS's native scheduler
+	// (Linux crontab, macOS launchd LaunchAgents, Windows Task Scheduler).
+	Scheduler        schedule.Backend
+	SchedulerInitErr error
+	// Crontab syncs scheduled tasks into the OS user crontab when Scheduler is nil.
+	Crontab *schedule.Crontab
+	// ShowProgress controls whether an editable "处理中…" status message is sent before the answer.
+	ShowProgress bool
+	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
+	ProgressInterval time.Duration
+	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.
+	ImageLoadTimeout time.Duration
+	// Now is the clock for scheduling; nil means time.Now.
+	Now func() time.Time
+
+	mu           sync.Mutex
+	lanes        map[string]*lane
+	dmChannels   map[string]string
+	lastSchedErr error
+}
+
+type lane struct {
+	ch        chan item
+	mu        sync.Mutex
+	depth     int
+	active    context.CancelFunc
+	runSeq    uint64
+	stopEpoch uint64
+}
+
+type item struct {
+	ctx     context.Context
+	baseCtx context.Context
+	in      platform.Inbound
+	out     platform.Replier
+	epoch   uint64
+	// task is set when the item is a scheduled run rather than a user message.
+	task *store.Task
+}
+
+// Handle marks an accepted message and queues it on that chat.
+func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.Replier) {
+	if in.Platform == "" {
+		in.Platform = platform.Telegram
+	}
+	if _, ok := s.AllowedUsers[in.Platform][in.UserID]; !ok {
+		s.send(ctx, out, in.ChatID, "没有权限。")
+		return
+	}
+	s.rememberChat(in.Platform, in.ChatID)
+	if !in.TextMessage {
+		s.send(ctx, out, in.ChatID, unsupportedText)
+		return
+	}
+	text := strings.TrimSpace(in.Text)
+	if text == "" && len(in.Images) == 0 && len(in.Files) == 0 {
+		return
+	}
+	in.Text = text
+	limitImages(&in)
+	limitFiles(&in)
+	// Nothing is downloaded yet: the declared size is enough to refuse an oversize attachment.
+	if oversize(in.Images) {
+		s.send(ctx, out, in.ChatID, imageTooLargeText)
+		return
+	}
+	if oversizeFiles(in.Files) {
+		s.send(ctx, out, in.ChatID, fileTooLargeText)
+		return
+	}
+	lane := s.lane(in.Platform, in.ChatID)
+	if isStopInbound(in, lane.busy()) {
+		running, queued := lane.stop()
+		s.send(ctx, out, in.ChatID, stopReplyText(running, queued))
+		return
+	}
+	ahead, epoch, ok := lane.reserve(s.limit())
+	if !ok {
+		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
+		return
+	}
+	if _, _, command := parseInboundCommand(in); !command {
+		if receipt, ok := out.(platform.Receipt); ok {
+			if err := receipt.MarkReceived(ctx, in); err != nil {
+				// A missing reaction or typing indicator must not prevent the reply.
+				slog.Warn("message receipt failed", "platform", in.Platform)
+			}
+		}
+	}
+	if ahead > 0 {
+		s.send(ctx, out, in.ChatID, fmt.Sprintf("已排队，前面还有 %d 条。", ahead))
+	}
+	lane.enqueue(item{ctx: ctx, in: in, out: out, epoch: epoch})
+}
+
+func (s *Service) limit() int {
+	if s.QueueLimit < 1 {
+		return 8
+	}
+	return s.QueueLimit
+}
+
+func (s *Service) lane(platformName, chatID string) *lane {
+	key := platformName + "\x00" + chatID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lanes == nil {
+		s.lanes = map[string]*lane{}
+	}
+	ln, ok := s.lanes[key]
+	if ok {
+		return ln
+	}
+	ln = &lane{ch: make(chan item, s.limit())}
+	s.lanes[key] = ln
+	go s.work(ln)
+	return ln
+}
+
+func (ln *lane) reserve(limit int) (ahead int, epoch uint64, ok bool) {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	if ln.depth >= limit {
+		return 0, 0, false
+	}
+	ahead = ln.depth
+	ln.depth++
+	return ahead, ln.stopEpoch, true
+}
+
+func (ln *lane) busy() bool {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	return ln.depth > 0
+}
+
+func (ln *lane) stop() (stoppedRunning bool, droppedQueued int) {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	hadWork := ln.depth > 0
+	ln.stopEpoch++
+	for {
+		select {
+		case <-ln.ch:
+			ln.depth--
+			droppedQueued++
+		default:
+			goto drained
+		}
+	}
+drained:
+	if ln.active != nil {
+		ln.runSeq++
+		ln.active()
+		ln.active = nil
+		stoppedRunning = true
+	} else if hadWork && ln.depth > 0 {
+		// An item was popped from ln.ch and will be dropped immediately via stopEpoch.
+		stoppedRunning = true
+	}
+	return stoppedRunning, droppedQueued
+}
+
+func (ln *lane) enqueue(it item) {
+	ln.ch <- it
+}
+
+func (s *Service) work(ln *lane) {
+	for it := range ln.ch {
+		baseCtx := it.ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		runCtx, cancel := context.WithCancel(baseCtx)
+		ln.mu.Lock()
+		if it.epoch < ln.stopEpoch {
+			ln.depth--
+			ln.mu.Unlock()
+			cancel()
+			continue
+		}
+		ln.runSeq++
+		seq := ln.runSeq
+		ln.active = cancel
+		ln.mu.Unlock()
+
+		it.baseCtx = baseCtx
+		it.ctx = runCtx
+		s.dispatch(it)
+
+		ln.mu.Lock()
+		if ln.runSeq == seq {
+			ln.active = nil
+		}
+		ln.depth--
+		ln.mu.Unlock()
+		cancel()
+	}
+}
+
+func (s *Service) dispatch(it item) {
+	ctx := it.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	baseCtx := it.baseCtx
+	stoppedByUser := func() bool {
+		return it.baseCtx != nil && ctx.Err() != nil && baseCtx.Err() == nil
+	}
+	if baseCtx == nil {
+		baseCtx = ctx
+	}
+	if it.task != nil {
+		text, files := s.runTask(ctx, it.in, it.out, *it.task)
+		if stoppedByUser() {
+			return
+		}
+		s.deliverTask(baseCtx, *it.task, it.in.Platform, it.in.ChatID, it.out, text, files)
+		return
+	}
+	view := s.startProgress(ctx, it)
+	reply, quiet, files, buttons, err := s.answerWithButtons(ctx, it.in, it.out, view.onTool(ctx))
+	if stoppedByUser() {
+		if view != nil {
+			_ = view.Delete(baseCtx)
+		}
+		return
+	}
+	if err != nil {
+		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
+		reply, quiet, files, buttons = codex.UserFacing(err), false, nil, nil
+	}
+	// The answer is shown first; the files follow it, each quoting the user's message.
+	defer func() { s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files) }()
+	if strings.TrimSpace(reply) == "" {
+		if quiet {
+			// The turn only reacted: the reaction is the answer, so the progress message goes away.
+			if view != nil {
+				_ = view.Delete(baseCtx)
+			}
+			return
+		}
+		reply = emptyReplyText
+	}
+	if len(buttons) > 0 {
+		if br, ok := it.out.(platform.ButtonReplier); ok {
+			if view != nil {
+				_ = view.Delete(baseCtx)
+			}
+			s.sendWithButtons(baseCtx, br, it.out, it.in.ChatID, reply, buttons)
+			return
+		}
+	}
+	if view != nil {
+		// Finish falls back to new messages itself and logs its own failure; do not resend.
+		_ = view.Finish(baseCtx, reply)
+		return
+	}
+	s.send(baseCtx, it.out, it.in.ChatID, reply)
+}
+
+// answer returns the text to show and the files to send after it. quiet means the turn was
+// answered by a reaction alone, so an empty text is not a failure.
+func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(codex.ToolUse)) (text string, quiet bool, files []actions.File, err error) {
+	text, quiet, files, _, err = s.answerWithButtons(ctx, in, out, onTool)
+	return text, quiet, files, err
+}
+
+func (s *Service) answerWithButtons(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(codex.ToolUse)) (text string, quiet bool, files []actions.File, buttons [][]platform.Button, err error) {
+	if cmd, arg, ok := parseInboundCommand(in); ok {
+		text, files, buttons, err = s.command(ctx, in, out, cmd, arg, onTool)
+		return text, false, files, buttons, err
+	}
+	if media.HasImageRequestIntent(in.Text) {
+		if safetyErr := media.CheckPromptSafety(in.Text); safetyErr != nil {
+			return safetyErr.Error(), false, nil, nil, nil
+		}
+	}
+	uploaded, fileFailure := s.saveUploads(ctx, in)
+	if fileFailure != "" {
+		return fileFailure, false, nil, nil, nil
+	}
+	var memNote string
+	if len(in.Images) == 0 && len(uploaded) == 0 {
+		reply, followup, note, memBtns, handled, err := s.tryNaturalMemory(ctx, in)
+		if handled || err != nil {
+			return reply, false, nil, memBtns, err
+		}
+		if followup != "" {
+			in.Text = followup
+			memNote = note
+		}
+	} else if content, rest, ok := parseExplicitMemoryAdd(in.Text); ok {
+		r, err := s.memoryAdd(ctx, in, content)
+		if err != nil {
+			return "", false, nil, nil, err
+		}
+		memNote = firstNoteLine(r)
+		in.Text = rest
+	}
+	if len(in.Images) == 0 {
+		taskIn := in
+		if len(uploaded) > 0 {
+			taskIn.Text = formatUploadedFilesPrompt(in.Text, uploaded, false)
+		}
+		if reply, taskFiles, taskBtns, handled, err := s.tryNaturalTask(ctx, taskIn, out, onTool); handled || err != nil {
+			if memNote != "" && reply != "" {
+				reply = memNote + "\n\n" + reply
+			}
+			return reply, false, taskFiles, taskBtns, err
+		}
+	}
+	images, failure := s.loadImages(ctx, in)
+	if failure != "" {
+		return failure, false, nil, nil, nil
+	}
+	text, quiet, files, err = s.chat(ctx, in, out, images, uploaded, memNote, onTool)
+	return text, quiet, files, nil, err
+}
+
+func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string, onTool func(codex.ToolUse)) (string, []actions.File, [][]platform.Button, error) {
+	switch cmd {
+	case "/start", "/help":
+		return helpText(s.Version), nil, nil, nil
+	case "/status":
+		text, btns, err := s.statusCommand(ctx, in)
+		return text, nil, btns, err
+	case "/stop", "/cancel":
+		return "当前没有正在执行的任务。", nil, nil, nil
+	case "/new":
+		text, btns, err := s.newTopicCommand(ctx, in, arg)
+		return text, nil, btns, err
+	case "/sessions", "/session":
+		text, btns, err := s.sessionsCommand(ctx, in, arg)
+		return text, nil, btns, err
+	case "/mcp":
+		text, err := s.mcpCommand(ctx, arg)
+		return text, nil, nil, err
+	case "/model":
+		text, btns, err := s.modelCommand(ctx, in, arg)
+		return text, nil, btns, err
+	case "/quota":
+		allowance, err := s.Engine.Allowance(ctx)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		text := codex.FormatAllowance(allowance)
+		if strings.TrimSpace(text) == "" {
+			return "暂时查不到剩余额度。", nil, nil, nil
+		}
+		return text, nil, nil, nil
+	case "/usage":
+		var lastUsage *store.UsageReport
+		if s.Store != nil {
+			if chat, chatErr := s.Store.Chat(ctx, in.Platform, in.ChatID); chatErr == nil {
+				lastUsage = chat.LastUsage
+			}
+		}
+		allowance, err := s.Engine.Allowance(ctx)
+		if err != nil {
+			if lastUsage != nil {
+				return codex.FormatUsage(lastUsage, false), nil, nil, nil
+			}
+			return "", nil, nil, err
+		}
+		text := strings.TrimSpace(codex.FormatAllowance(allowance))
+		if text == "" {
+			if lastUsage != nil {
+				return codex.FormatUsage(lastUsage, false), nil, nil, nil
+			}
+			return "暂时查不到剩余额度。", nil, nil, nil
+		}
+		if lastUsage != nil {
+			text += "\n\n" + codex.FormatUsage(lastUsage, false)
+		}
+		return text, nil, nil, nil
+	case "/dir":
+		text, err := s.dirCommand(ctx, in, arg)
+		return text, nil, nil, err
+	case "/shell":
+		text, btns, err := s.shellCommand(ctx, arg)
+		return text, nil, btns, err
+	case "/memory":
+		text, btns, err := s.memoryCommand(ctx, in, arg)
+		return text, nil, btns, err
+	case "/task":
+		return s.taskCommand(ctx, in, out, arg, onTool)
+	case "/reset":
+		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
+			return "", nil, nil, err
+		}
+		if memories := s.chatMemories(ctx, in.Platform, in.ChatID); len(memories) > 0 {
+			return fmt.Sprintf("已清空这个聊天的上下文（%d 条长期记忆继续保留）。", len(memories)), nil, nil, nil
+		}
+		return "已清空这个聊天的上下文。", nil, nil, nil
+	default:
+		return "没有这个命令。\n\n" + helpText(s.Version), nil, nil, nil
+	}
+}
+
+func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg string) (string, [][]platform.Button, error) {
+	list, err := s.Engine.Models(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
+	if err != nil {
+		return "", nil, err
+	}
+	if arg == "" {
+		return formatModels(chat.Model, list), modelButtons(chat.Model, list), nil
+	}
+	if !codex.ValidModelName(arg) || !containsModel(list, arg) {
+		return "没有这个模型。用 /model 查看可用模型。", modelButtons(chat.Model, list), nil
+	}
+	if err := s.Store.SetModel(ctx, in.Platform, in.ChatID, arg); err != nil {
+		return "", nil, err
+	}
+	return "已切换到 " + arg + "。下一条消息开始使用。", nil, nil
+}
+
+// chat applies write grants from the message, runs the turn, and adds the
+// confirmations before the reply and the /reset reminder after it.
+// quiet is true when Codex reacted and had nothing to add: reply then holds only the
+// confirmations (a grant must always be confirmed), which may be empty.
+func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, images []codex.Image, uploaded []uploadedFile, memNote string, onTool func(codex.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
+	notes := s.applyGrants(ctx, in.Text)
+	if memNote != "" {
+		notes = append([]string{memNote}, notes...)
+	}
+	if in.Skipped {
+		notes = append([]string{skippedNote}, notes...)
+	}
+	res, err := s.chatTurn(ctx, in, out, images, uploaded, onTool)
+	if err != nil {
+		return "", false, nil, err
+	}
+	// The single place that decides whether the turn produced anything to show. It runs
+	// before notes and the reminder are added around the reply, so they cannot hide an empty answer.
+	text := strings.TrimSpace(res.text)
+	empty := text == "" || text == noReply
+	if empty && res.reacted {
+		if res.rebuilt {
+			notes = append(notes, rebuiltNotice)
+		}
+		if mentionsPath(in.Text) && s.needsReset(ctx, in) {
+			notes = append(notes, resetReminder)
+		}
+		return strings.Join(notes, "\n"), true, res.files, nil
+	}
+	reply = res.text
+	if empty {
+		if len(res.files) > 0 {
+			reply = mediaDeliveredFallback
+		} else {
+			reply = emptyReplyText
+		}
+	}
+	if res.rebuilt {
+		reply = rebuiltNotice + "\n\n" + reply
+	}
+	if len(notes) > 0 {
+		reply = strings.Join(notes, "\n") + "\n\n" + reply
+	}
+	if mentionsPath(in.Text) && s.needsReset(ctx, in) {
+		reply += "\n\n" + resetReminder
+	}
+	return reply, false, res.files, nil
+}
+
+// needsReset is kept as false now that existing sessions also receive file tools directly.
+func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
+	return false
+}
+
+// rebuiltNotice opens a reply that was answered in a new session because the old one was gone.
+const rebuiltNotice = "之前的上下文已经失效，这是新的一段对话。"
+
+// chatResult is the outcome of one chat turn.
+type chatResult struct {
+	text    string
+	reacted bool           // Codex put a reaction on the user's message
+	files   []actions.File // files Codex asked to send, in call order
+	rebuilt bool           // the answer came from a new session after the old one went missing
+}
+
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platform.Replier, images []codex.Image, uploaded []uploadedFile, onTool func(codex.ToolUse)) (chatResult, error) {
+	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
+	if err != nil {
+		return chatResult{}, err
+	}
+	prompt := in.Text
+	if len(images) > 0 {
+		prompt = imagePrompt(prompt, len(images))
+	}
+	if len(uploaded) > 0 {
+		prompt = formatUploadedFilesPrompt(prompt, uploaded, true)
+	}
+	prompt = s.withLinkPrefetch(ctx, in.Text, prompt)
+	prompt = s.withChatTasksContext(ctx, in, prompt)
+	prompt = withReplyQuote(prompt, in.ReplyToText)
+
+	// The images and long-term memories stay in base so new, resumed, and rebuilt sessions all receive them.
+	base := codex.ReplyOptions{
+		Model:     chat.Model,
+		Prompt:    prompt,
+		WebSearch: s.WebSearch,
+		ImageGen:  s.canGenerateImages(out),
+		OnTool:    onTool,
+		Images:    images,
+		Memories:  s.chatMemories(ctx, in.Platform, in.ChatID),
+	}
+	if chat.SessionID == "" {
+		return s.startSession(ctx, in, out, base)
+	}
+	opts := base
+	opts.SessionID = chat.SessionID
+	opts.ShellTools = s.shellEnabled(ctx)
+	// A resumed session keeps the sandbox it was created with; when bubblewrap is missing on Linux
+	// codex refuses any custom sandbox profile, so run unsandboxed instead.
+	opts.Sandbox = chat.Sandbox
+	if ready, profile, rw, _ := s.fileAccess(ctx); ready {
+		if profile == "" {
+			opts.Sandbox = ""
+		}
+		opts.FileTools = true
+		opts.WriteDirs = rw
+	}
+	res, err := s.reply(ctx, in, out, opts)
+	if err != nil && opts.Sandbox != "" && sandboxUnavailable(err) {
+		opts.Sandbox = ""
+		res, err = s.reply(ctx, in, out, opts)
+	}
+	if err != nil && sessionMissing(err) {
+		res, err := s.startSession(ctx, in, out, base)
+		if err != nil {
+			return chatResult{}, err
+		}
+		res.rebuilt = true
+		return res, nil
+	}
+	if err != nil {
+		if codex.IsMaxTurns(err) {
+			_ = s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID)
+			s.recordSessionTurn(ctx, in, res.sessionID, chat.Model, opts.Sandbox)
+			res.text = codex.UserFacing(err)
+			return res.chatResult, nil
+		}
+		return chatResult{}, err
+	}
+	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID); err != nil {
+		return chatResult{}, err
+	}
+	s.recordSessionTurn(ctx, in, res.sessionID, chat.Model, opts.Sandbox)
+	return res.chatResult, nil
+}
+
+// startSession runs the turn in a new Codex session and records the sandbox it was created with.
+func (s *Service) startSession(ctx context.Context, in platform.Inbound, out platform.Replier, opts codex.ReplyOptions) (chatResult, error) {
+	sessionID, err := newUUID()
+	if err != nil {
+		return chatResult{}, err
+	}
+	opts.SessionID = sessionID
+	opts.NewSession = true
+	profile := s.newSessionOptions(ctx, &opts)
+	res, err := s.reply(ctx, in, out, opts)
+	if err != nil && opts.Sandbox != "" && sandboxUnavailable(err) {
+		opts.Sandbox = ""
+		profile = ""
+		res, err = s.reply(ctx, in, out, opts)
+	}
+	if err != nil {
+		if codex.IsMaxTurns(err) {
+			_ = s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile)
+			s.recordSessionTurn(ctx, in, res.sessionID, opts.Model, profile)
+			res.text = codex.UserFacing(err)
+			return res.chatResult, nil
+		}
+		return chatResult{}, err
+	}
+	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile); err != nil {
+		return chatResult{}, err
+	}
+	s.recordSessionTurn(ctx, in, res.sessionID, opts.Model, profile)
+	return res.chatResult, nil
+}
+
+// replyResult is a chat result together with the session codex answered in.
+type replyResult struct {
+	chatResult
+	sessionID string
+}
+
+// reply runs one codex call inside its own turn. The turn opens just before the call, once opts
+// says which tools this session gets, and its token ends when the call returns. The reaction
+// and queued files are those of this call alone.
+func (s *Service) reply(ctx context.Context, in platform.Inbound, out platform.Replier, opts codex.ReplyOptions) (replyResult, error) {
+	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)
+	defer end()
+	var unsafeMedia atomic.Bool
+	opts.OnTool = wrapToolSafetyMonitor(opts.OnTool, opts.ImageGen, &unsafeMedia)
+	result, err := s.Engine.Reply(ctx, withTurn(opts, turn, env))
+	sessionID := result.SessionID
+	if sessionID == "" {
+		sessionID = opts.SessionID
+	}
+	if result.Usage != nil && s.Store != nil {
+		_ = s.Store.SetLastUsage(ctx, in.Platform, in.ChatID, &store.UsageReport{
+			At:     s.now(),
+			Status: "completed",
+			Tokens: result.Usage,
+		})
+	}
+	text := result.Text
+	if len(result.GeneratedImages) > 0 {
+		text = cleanLocalImageRefs(text)
+	}
+	res := replyResult{chatResult: chatResult{text: text}, sessionID: sessionID}
+	if turn != nil {
+		res.reacted = turn.Reacted()
+		res.files = turn.Files()
+	}
+	if unsafeMedia.Load() {
+		res.files = nil
+		res.text = media.ErrUnsafeMedia.Error()
+	} else if len(result.GeneratedImages) > 0 {
+		res.files = s.appendGeneratedImages(res.files, result.GeneratedImages, out)
+	}
+	if err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+func (s *Service) send(ctx context.Context, out platform.Replier, chatID, text string) {
+	if err := out.Send(ctx, chatID, text); err != nil {
+		slog.Error("send failed", "chat", chatID, "err", safeErr(err))
+	}
+}
+
+func (s *Service) sendWithButtons(ctx context.Context, br platform.ButtonReplier, fallback platform.Replier, chatID, text string, rows [][]platform.Button) {
+	if err := br.SendWithButtons(ctx, chatID, text, rows); err != nil {
+		slog.Warn("send with buttons failed, falling back to plain send", "chat", chatID, "err", safeErr(err))
+		s.send(ctx, fallback, chatID, text)
+	}
+}
+
+// safeErr renders an error for logs without any request URL. Platform HTTP clients return
+// *url.Error whose text embeds the request URL, and a Telegram URL contains the bot token.
+func safeErr(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	return err.Error()
+}
+
+func parseCommand(text string) (cmd, arg string, ok bool) {
+	if !strings.HasPrefix(text, "/") {
+		return "", "", false
+	}
+	fields := strings.SplitN(text, " ", 2)
+	name := fields[0]
+	if i := strings.IndexByte(name, '@'); i >= 0 {
+		name = name[:i]
+	}
+	name = strings.ToLower(name)
+	if name == "/" {
+		return "", "", false
+	}
+	if len(fields) == 2 {
+		arg = strings.TrimSpace(fields[1])
+	}
+	return name, arg, true
+}
+
+func isStopInbound(in platform.Inbound, busy bool) bool {
+	if len(in.Images) > 0 || len(in.Files) > 0 {
+		return false
+	}
+	if cmd, arg, ok := parseCommand(in.Text); ok && arg == "" && (cmd == "/stop" || cmd == "/cancel") {
+		return true
+	}
+	if !busy {
+		return false
+	}
+	trimmed := strings.TrimRight(strings.TrimSpace(in.Text), "。！!？?")
+	switch trimmed {
+	case "停止", "停一下", "停止当前任务", "取消当前任务", "停止执行", "终止任务":
+		return true
+	}
+	return false
+}
+
+func stopReplyText(running bool, queued int) string {
+	switch {
+	case running && queued > 0:
+		return fmt.Sprintf("已停止当前任务，并取消了 %d 条排队中的消息。", queued)
+	case running:
+		return "已停止当前任务。"
+	case queued > 0:
+		return fmt.Sprintf("已取消 %d 条排队中的消息。", queued)
+	default:
+		return "当前没有正在执行的任务。"
+	}
+}
+
+func helpText(version string) string {
+	text := `直接发文字、图片、文件或网页链接，我会接着当前平台的上下文回复；支持询问单词/句子标准发音（附可播放语音条），支持 AI 生成或联网查找移动端适配图片（严格拦截违规内容）；引用任意消息回复时会自动带上被引用内容，消息中的 GitHub / X / 网页链接会自动安全抓取摘要。
+
+/status
+    查看运行状态、权限开关与 MCP 列表概览（附快捷按钮）
+/stop
+    立即中断当前正在执行的对话或任务
+/new [备注]
+    归档当前会话并开启新话题（长期记忆继续保留）
+/sessions
+    查看 TG / Discord 跨平台历史会话（支持一键按钮或 /sessions 编号 跨平台接力）
+/mcp
+    查看、诊断或增删改 MCP 服务（/mcp doctor、/mcp add、/mcp del）
+/model [模型名]
+    查看或点选切换这个聊天使用的模型
+/usage
+    查看订阅剩余额度与最近一轮 Token 消耗
+/quota
+    查看订阅剩余额度窗口
+/dir
+    查看或管理 Codex 可以读写的目录
+/shell
+    查看或开关服务器命令执行权限（/shell on、/shell off）
+/memory
+    查看或管理长期记忆（TG / Discord 自动同步，执行 /reset 后仍会保留）
+/task 一句话
+    创建或管理定时任务（TG / Discord 共享并同时推送，支持每天/每周/每月/最后一天/工作日/5段Cron）
+/task list
+    查看定时任务（附一键试跑/暂停/恢复/删除按钮）
+/task run 编号
+    立即试跑一次定时任务（不影响正常排期）
+/task pause 编号 / /task resume 编号
+    暂停或恢复指定定时任务
+/task del 编号
+    删除定时任务
+/reset
+    清空这个聊天的上下文（长期记忆会保留）
+/help
+    显示这条说明`
+	if version != "" && version != "dev" {
+		text += "\n\n版本：" + version
+	}
+	return text
+}
+
+func formatModels(current string, list codex.ModelList) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "当前模型：%s\n\n可用模型：\n", current)
+	shown := map[string]struct{}{}
+	for _, name := range list.Names {
+		shown[name] = struct{}{}
+		if name == current {
+			fmt.Fprintf(&b, "- %s（当前）\n", name)
+			continue
+		}
+		fmt.Fprintf(&b, "- %s\n", name)
+	}
+	if _, ok := shown[current]; !ok && current != "" {
+		fmt.Fprintf(&b, "- %s（当前，不在本次列表里）\n", current)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func containsModel(list codex.ModelList, name string) bool {
+	for _, item := range list.Names {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionMissing(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "session") && (strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no such") ||
+		strings.Contains(msg, "couldn't start") ||
+		strings.Contains(msg, "could not"))
+}
+
+func sandboxUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not enforce its deny list") || strings.Contains(msg, "bwrap exec failed")
+}
+
+func (s *Service) withChatTasksContext(ctx context.Context, in platform.Inbound, prompt string) string {
+	if !strings.Contains(in.Text, "任务") {
+		return prompt
+	}
+	tasks, err := s.Store.AllTasks(ctx)
+	if err != nil || len(tasks) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString("[当前聊天的定时任务列表]\n")
+	for _, t := range tasks {
+		status := fmt.Sprintf("下次 %s", t.NextRun.In(s.location()).Format("01-02 15:04"))
+		if t.Paused {
+			status = "已暂停"
+		}
+		fmt.Fprintf(&b, "#%d %s（指令：%s；状态：%s）\n", t.ID, t.Summary, t.Prompt, status)
+	}
+	b.WriteString("[列表结束]\n\n")
+	b.WriteString(prompt)
+	return b.String()
+}
+
+func withReplyQuote(prompt, quote string) string {
+	quote = strings.TrimSpace(quote)
+	if quote == "" {
+		return prompt
+	}
+	return fmt.Sprintf("[用户正在引用以下消息进行回复]\n%s\n[引用结束]\n\n%s", quote, prompt)
+}
+
+func newUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}

@@ -1,8 +1,11 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -10,133 +13,252 @@ import (
 )
 
 var (
-	mcpNameRE      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	bearerSecretRE = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}`)
-	kvSecretRE     = regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*["']?)[^\s"',;]{6,}`)
-	skSecretRE     = regexp.MustCompile(`\b(xai-|sk-|ghp_|gho_|github_pat_)[A-Za-z0-9_-]{10,}`)
+	reBearerSecret = regexp.MustCompile(`(?i)\b(Bearer\s+)([^\s"',;]+)`)
+	reTokenPrefix  = regexp.MustCompile(`\b(sk|xai|ghp|gho|github_pat|glpat|xoxb|xoxp)-[A-Za-z0-9_\-]{6,}`)
+	reSecretKV     = regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie|credential)[A-Za-z0-9_]*)\s*([=:])\s*([^\s"',;\n]+)`)
 )
 
 // ReservedMCPName is the internal MCP server name managed by codex-bot for
 // interactive buttons and media tools; users cannot overwrite or remove it.
 const ReservedMCPName = "codexbot"
 
-// RedactSensitive masks bearer tokens, API keys, and key=value secrets.
-func RedactSensitive(s string) string {
-	s = bearerSecretRE.ReplaceAllString(s, "${1}[REDACTED]")
-	s = kvSecretRE.ReplaceAllString(s, "${1}[REDACTED]")
-	s = skSecretRE.ReplaceAllString(s, "${1}[REDACTED]")
-	return s
-}
-
-func validMCPName(name string) bool {
-	return !strings.HasPrefix(name, "-") && mcpNameRE.MatchString(name)
-}
-
-func validTransport(t string) bool {
-	switch t {
-	case "http", "sse", "stdio":
-		return true
+// RedactSensitive masks tokens, API keys, passwords, and auth headers in CLI outputs.
+func RedactSensitive(text string) string {
+	if text == "" {
+		return ""
 	}
-	return false
+	out := reBearerSecret.ReplaceAllString(text, "${1}****")
+	out = reTokenPrefix.ReplaceAllString(out, "${1}-****")
+	out = reSecretKV.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reSecretKV.FindStringSubmatch(m)
+		if len(sub) != 4 {
+			return m
+		}
+		if strings.EqualFold(sub[3], "bearer") {
+			return m
+		}
+		return sub[1] + sub[2] + " ****"
+	})
+	return out
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 // Version returns the installed Codex CLI version string.
 func (c *Client) Version(ctx context.Context) (string, error) {
-	return c.runQuick(ctx, 10*time.Second, "--version")
-}
-
-// MCPList lists configured MCP servers.
-func (c *Client) MCPList(ctx context.Context) (string, error) {
-	return c.runQuick(ctx, 15*time.Second, "mcp", "list")
-}
-
-// MCPDoctor checks MCP server health (falls back to `mcp list` if `doctor` is unsupported).
-func (c *Client) MCPDoctor(ctx context.Context) (string, error) {
-	out, err := c.runQuick(ctx, 30*time.Second, "mcp", "doctor")
+	out, err := c.runAdmin(ctx, 10*time.Second, "--version")
 	if err != nil {
-		if listOut, listErr := c.runQuick(ctx, 15*time.Second, "mcp", "list"); listErr == nil {
+		return "", err
+	}
+	return firstLine(out), nil
+}
+
+// MCPList returns configured MCP servers (with sensitive fields redacted).
+func (c *Client) MCPList(ctx context.Context) (string, error) {
+	out, err := c.runAdmin(ctx, 20*time.Second, "mcp", "list")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(RedactSensitive(out)), nil
+}
+
+// MCPDoctor diagnoses MCP server configuration and handshake connectivity.
+func (c *Client) MCPDoctor(ctx context.Context, name string) (string, error) {
+	args := []string{"mcp", "doctor"}
+	name = strings.TrimSpace(name)
+	if name != "" {
+		if err := checkMCPName(name); err != nil {
+			return "", err
+		}
+		args = append(args, name)
+	}
+	out, err := c.runAdmin(ctx, 45*time.Second, args...)
+	if err != nil {
+		if trimmed := strings.TrimSpace(RedactSensitive(out)); trimmed != "" {
+			return trimmed, nil
+		}
+		if listOut, listErr := c.MCPList(ctx); listErr == nil && listOut != "" {
 			return listOut, nil
 		}
+		return "", err
 	}
-	return out, err
+	return strings.TrimSpace(RedactSensitive(out)), nil
 }
 
-// MCPAdd registers a new MCP server.
-func (c *Client) MCPAdd(ctx context.Context, transport, name, target string, extraArgs []string) (string, error) {
-	if !validTransport(transport) {
-		return "", errors.New("invalid transport (expected http, sse, or stdio)")
+// MCPAdd adds or updates a user-scoped MCP server and resets the codex leader daemon.
+func (c *Client) MCPAdd(ctx context.Context, rawArgs []string) (string, error) {
+	built, err := buildMCPAddArgs(rawArgs)
+	if err != nil {
+		return "", err
 	}
-	if !validMCPName(name) {
-		return "", errors.New("invalid server name (use letters, digits, '-' or '_')")
+	out, err := c.runAdmin(ctx, 25*time.Second, built...)
+	if err != nil {
+		return "", err
 	}
-	if strings.EqualFold(name, ReservedMCPName) {
-		return "", errors.New("server name 'codexbot' is reserved")
-	}
-	target = strings.TrimSpace(target)
-	if target == "" || strings.HasPrefix(target, "-") {
-		return "", errors.New("invalid target URL or command")
-	}
-	for _, a := range extraArgs {
-		if strings.ContainsRune(a, 0) {
-			return "", errors.New("invalid argument")
-		}
-	}
-	if transport == "stdio" {
-		args := []string{"mcp", "add", name, "--", target}
-		args = append(args, extraArgs...)
-		return c.runQuick(ctx, 15*time.Second, args...)
-	}
-	args := []string{"mcp", "add", "--transport", transport, name, target}
-	if len(extraArgs) > 0 {
-		args = append(args, "--")
-		args = append(args, extraArgs...)
-	}
-	return c.runQuick(ctx, 15*time.Second, args...)
+	c.ResetLeader(ctx)
+	return strings.TrimSpace(RedactSensitive(out)), nil
 }
 
-// MCPRemove unregisters an MCP server by name.
+// MCPRemove removes a user-scoped MCP server and resets the codex leader daemon.
 func (c *Client) MCPRemove(ctx context.Context, name string) (string, error) {
-	if !validMCPName(name) {
-		return "", errors.New("invalid server name")
+	name = strings.TrimSpace(name)
+	if err := checkMCPName(name); err != nil {
+		return "", err
 	}
-	if strings.EqualFold(name, ReservedMCPName) {
-		return "", errors.New("server name 'codexbot' is reserved")
+	out, err := c.runAdmin(ctx, 15*time.Second, "mcp", "remove", name)
+	if err != nil {
+		return "", err
 	}
-	return c.runQuick(ctx, 15*time.Second, "mcp", "remove", name)
+	c.ResetLeader(ctx)
+	return strings.TrimSpace(RedactSensitive(out)), nil
 }
 
-// MCPEnable enables or disables an MCP server by name.
+// MCPEnable enables or disables an MCP server and resets the codex leader daemon.
 func (c *Client) MCPEnable(ctx context.Context, name string, enable bool) (string, error) {
-	if !validMCPName(name) {
-		return "", errors.New("invalid server name")
-	}
-	if strings.EqualFold(name, ReservedMCPName) {
-		return "", errors.New("server name 'codexbot' is reserved")
+	name = strings.TrimSpace(name)
+	if err := checkMCPName(name); err != nil {
+		return "", err
 	}
 	sub := "disable"
 	if enable {
 		sub = "enable"
 	}
-	return c.runQuick(ctx, 15*time.Second, "mcp", sub, name)
+	out, err := c.runAdmin(ctx, 15*time.Second, "mcp", sub, name)
+	if err != nil {
+		return "", err
+	}
+	c.ResetLeader(ctx)
+	return strings.TrimSpace(RedactSensitive(out)), nil
 }
 
-func (c *Client) runQuick(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+func checkMCPName(name string) error {
+	if name == "" {
+		return errors.New("请指定 MCP 服务名称。")
+	}
+	if strings.HasPrefix(name, "-") {
+		return errors.New("MCP 服务名称不能以 - 开头。")
+	}
+	if strings.EqualFold(name, ReservedMCPName) || strings.EqualFold(name, "grokbot") {
+		return errors.New("codexbot 是机器人内置通信通道，不能修改或删除。")
+	}
+	return nil
+}
 
-	cmd := exec.CommandContext(runCtx, c.bin(), args...)
-	if c.Workspace != "" {
-		cmd.Dir = c.Workspace
+func buildMCPAddArgs(rawArgs []string) ([]string, error) {
+	if len(rawArgs) == 0 {
+		return nil, errors.New("参数不足。")
 	}
-	cmd.Env = envWithoutUpdate()
-	out, err := cmd.CombinedOutput()
-	clean := strings.TrimSpace(ansiRE.ReplaceAllString(string(out), ""))
-	clean = RedactSensitive(clean)
-	if err != nil {
-		if clean != "" {
-			return "", errors.New(clean)
+	var opts []string
+	var pos []string
+	var afterDashDash []string
+	hasDashDash := false
+
+	for i := 0; i < len(rawArgs); i++ {
+		tok := rawArgs[i]
+		if hasDashDash {
+			afterDashDash = append(afterDashDash, tok)
+			continue
 		}
-		return "", errors.New("codex command failed")
+		if tok == "--" {
+			hasDashDash = true
+			continue
+		}
+		switch {
+		case tok == "-s" || tok == "--scope" || strings.HasPrefix(tok, "--scope="):
+			return nil, errors.New("无需指定 --scope，默认固定写入当前用户的 ~/.codex/config.toml。")
+		case tok == "--leader-socket" || strings.HasPrefix(tok, "--leader-socket=") ||
+			tok == "--debug-file" || strings.HasPrefix(tok, "--debug-file="):
+			return nil, errors.New("不允许传递该底层调试参数。")
+		case tok == "-t" || tok == "--transport" || tok == "-e" || tok == "--env" || tok == "-H" || tok == "--header":
+			if i+1 >= len(rawArgs) {
+				return nil, fmt.Errorf("参数 %s 缺少对应的值。", tok)
+			}
+			opts = append(opts, tok, rawArgs[i+1])
+			i++
+		case strings.HasPrefix(tok, "--transport=") || strings.HasPrefix(tok, "--env=") || strings.HasPrefix(tok, "--header="):
+			opts = append(opts, tok)
+		case strings.HasPrefix(tok, "-"):
+			return nil, fmt.Errorf("不支持的选项：%s", tok)
+		default:
+			pos = append(pos, tok)
+		}
 	}
-	return clean, nil
+
+	if len(pos) == 0 {
+		return nil, errors.New("请提供 MCP 名称和地址/启动命令。")
+	}
+	name := pos[0]
+	if err := checkMCPName(name); err != nil {
+		return nil, err
+	}
+	restPos := pos[1:]
+	if len(restPos) == 0 && len(afterDashDash) == 0 {
+		return nil, errors.New("请提供 MCP 的 HTTP/SSE URL 或本地启动命令。")
+	}
+
+	built := []string{"mcp", "add"}
+	built = append(built, opts...)
+	built = append(built, name)
+
+	if hasDashDash {
+		built = append(built, restPos...)
+		if len(afterDashDash) > 0 {
+			built = append(built, "--")
+			built = append(built, afterDashDash...)
+		}
+		return built, nil
+	}
+
+	target := restPos[0]
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		if len(restPos) > 1 {
+			return nil, errors.New("远程 URL 模式只需要一个地址参数；请求头请用 -H \"Header: Value\"。")
+		}
+		built = append(built, "--url", target)
+		return built, nil
+	}
+	built = append(built, "--")
+	built = append(built, restPos...)
+	return built, nil
+}
+
+func (c *Client) runAdmin(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
+	bin := c.bin()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = envWithoutUpdate()
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cmd.Dir = home
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	combined := strings.TrimSpace(ansiRE.ReplaceAllString(stdout.String(), ""))
+	if combined == "" {
+		combined = strings.TrimSpace(ansiRE.ReplaceAllString(stderr.String(), ""))
+	} else if se := strings.TrimSpace(ansiRE.ReplaceAllString(stderr.String(), "")); se != "" {
+		combined = combined + "\n" + se
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return combined, ctx.Err()
+		}
+		detail := firstLine(RedactSensitive(stderr.String()))
+		if detail == "" {
+			detail = firstLine(RedactSensitive(stdout.String()))
+		}
+		if detail != "" {
+			return combined, &RunError{Message: detail}
+		}
+		return combined, err
+	}
+	return combined, nil
 }

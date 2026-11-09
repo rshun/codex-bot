@@ -375,9 +375,12 @@ func (c *Client) Models(ctx context.Context) (ModelList, error) {
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		res := ParseModels(string(out))
-		if len(res.Available) > 0 {
+		if len(res.Names) > 0 {
 			if res.Current == "" {
 				res.Current = c.DefaultModel
+			}
+			if res.Default == "" {
+				res.Default = res.Current
 			}
 			return res, nil
 		}
@@ -404,19 +407,16 @@ func (c *Client) Models(ctx context.Context) (ModelList, error) {
 			avail = append(avail, m)
 		}
 	}
-	return ModelList{Current: cur, Available: avail}, nil
+	return ModelList{Default: cur, Current: cur, Names: avail, Available: avail}, nil
 }
 
 // ResetLeader clears any cached leader state in the workspace if present.
-func (c *Client) ResetLeader() error {
+func (c *Client) ResetLeader(_ context.Context) {
 	if c.Workspace == "" {
-		return nil
+		return
 	}
 	target := filepath.Join(c.Workspace, ".codex", "leader.json")
-	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	_ = os.Remove(target)
 }
 
 // Allowance queries the ChatGPT / Codex account rate-limit windows via

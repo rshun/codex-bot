@@ -161,9 +161,7 @@ func TestResetLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &Client{Workspace: dir}
-	if err := c.ResetLeader(); err != nil {
-		t.Fatalf("ResetLeader: %v", err)
-	}
+	c.ResetLeader(t.Context())
 	if _, err := os.Stat(leader); !os.IsNotExist(err) {
 		t.Fatalf("expected leader.json to be removed")
 	}

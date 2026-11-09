@@ -26,7 +26,9 @@ func ValidModelName(name string) bool {
 
 // ModelList represents the parsed output of model discovery.
 type ModelList struct {
+	Default   string
 	Current   string
+	Names     []string
 	Available []string
 }
 
@@ -34,15 +36,39 @@ type ModelList struct {
 func ParseModels(raw string) ModelList {
 	clean := ansiRE.ReplaceAllString(raw, "")
 	var out ModelList
+	seen := make(map[string]bool)
 	for _, line := range strings.Split(clean, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "Default model:") {
+			name := strings.TrimSpace(strings.TrimPrefix(trim, "Default model:"))
+			if name != "" {
+				out.Default = name
+				if out.Current == "" {
+					out.Current = name
+				}
+			}
+			continue
+		}
 		m := modelLineRE.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
 		name := m[2]
-		out.Available = append(out.Available, name)
+		if !seen[name] {
+			seen[name] = true
+			out.Available = append(out.Available, name)
+			out.Names = append(out.Names, name)
+		}
 		if m[1] == "*" || m[3] == "current" {
 			out.Current = name
+			if out.Default == "" {
+				out.Default = name
+			}
+		} else if m[3] == "default" && out.Default == "" {
+			out.Default = name
+			if out.Current == "" {
+				out.Current = name
+			}
 		}
 	}
 	return out
@@ -301,21 +327,25 @@ func FormatAllowance(a Allowance) string {
 		return strings.Join(lines, "\n")
 	}
 
-	var lines []string
+	var b strings.Builder
 	if a.Tier != "" {
-		lines = append(lines, fmt.Sprintf("Tier: %s", a.Tier))
+		fmt.Fprintf(&b, "套餐：%s\n", a.Tier)
 	}
-	if a.HasUsedPercent {
-		remaining := 100 - a.UsedPercent
-		if remaining < 0 {
-			remaining = 0
-		}
-		lines = append(lines, fmt.Sprintf("Used: %.1f%% (%.1f%% remaining)", a.UsedPercent, remaining))
+	if !a.HasUsedPercent {
+		return strings.TrimSpace(b.String())
 	}
+	remaining := 100 - a.UsedPercent
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining > 100 {
+		remaining = 100
+	}
+	fmt.Fprintf(&b, "本期剩余：%.0f%%（已用 %.0f%%）\n", remaining, a.UsedPercent)
 	if a.PeriodKind != "" && !a.PeriodEnd.IsZero() {
-		lines = append(lines, fmt.Sprintf("Resets (%s): %s", a.PeriodKind, a.PeriodEnd.UTC().Format("2006-01-02 15:04 UTC")))
+		fmt.Fprintf(&b, "重置时间（%s）：%s\n", a.PeriodKind, a.PeriodEnd.In(time.Local).Format("2006-01-02 15:04 MST"))
 	}
-	return strings.Join(lines, "\n")
+	return strings.TrimSpace(b.String())
 }
 
 // NormalizeUsage clamps any negative token counts in a UsageTokens struct to 0.

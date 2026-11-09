@@ -18,19 +18,16 @@ func TestMCPValidationAndReservedName(t *testing.T) {
 	c := &Client{Bin: "codex"}
 	ctx := context.Background()
 
-	if _, err := c.MCPAdd(ctx, "stdio", "codexbot", "npx", nil); err == nil || !strings.Contains(err.Error(), "reserved") {
+	if _, err := c.MCPAdd(ctx, []string{"codexbot", "--", "npx"}); err == nil || !strings.Contains(err.Error(), "codexbot") {
 		t.Fatalf("expected reserved name error, got %v", err)
 	}
-	if _, err := c.MCPRemove(ctx, "codexbot"); err == nil || !strings.Contains(err.Error(), "reserved") {
+	if _, err := c.MCPRemove(ctx, "codexbot"); err == nil || !strings.Contains(err.Error(), "codexbot") {
 		t.Fatalf("expected reserved name error on remove, got %v", err)
 	}
-	if _, err := c.MCPEnable(ctx, "codexbot", false); err == nil || !strings.Contains(err.Error(), "reserved") {
+	if _, err := c.MCPEnable(ctx, "codexbot", false); err == nil || !strings.Contains(err.Error(), "codexbot") {
 		t.Fatalf("expected reserved name error on enable/disable, got %v", err)
 	}
-	if _, err := c.MCPAdd(ctx, "invalid", "myserver", "https://example.com", nil); err == nil {
-		t.Fatal("expected invalid transport error")
-	}
-	if _, err := c.MCPAdd(ctx, "http", "-flag", "https://example.com", nil); err == nil {
+	if _, err := c.MCPAdd(ctx, []string{"-flag", "https://example.com"}); err == nil {
 		t.Fatal("expected invalid server name error")
 	}
 }
