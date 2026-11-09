@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -mod=readonly ./...
+      - name: Build Linux, Windows, and macOS binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ldflags="-s -w -X main.version=${GITHUB_REF_NAME}"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/codex-bot-linux-amd64 ./cmd/codex-bot
+          cp dist/codex-bot-linux-amd64 dist/codex-bot
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/codex-bot-linux-arm64 ./cmd/codex-bot
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/codex-bot-windows-amd64.exe ./cmd/codex-bot
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/codex-bot-darwin-arm64 ./cmd/codex-bot
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/codex-bot-darwin-amd64 ./cmd/codex-bot
+
+          cd dist
+          sha256sum codex-bot* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="$(printf '## 构建产物 (Linux / Windows / macOS)\n\n```text\n%s\n```\n' "$(cat dist/SHA256SUMS)")"
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --notes "$notes"
