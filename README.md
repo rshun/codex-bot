@@ -1,516 +1,565 @@
-# Codex Bot
+# codex-bot
 
-在 Debian 上运行的 Node.js Telegram Bot，通过本机 `codex exec` 执行任务。普通文本和 `/codex` 使用同一个会话，后续消息通过明确的会话 ID 恢复上下文。模型选择和会话关联会持久化，Bot 重启后可继续对话。
+基于本机已登录 `codex` CLI 订阅的 **Telegram & Discord 双平台私人 AI 助手**（零按量 API Key 计费）。  
+A self-hosted **Telegram & Discord private AI assistant** powered by your local logged-in `codex` CLI subscription — **no pay-per-token API keys required**.
 
-同仓库提供独立 Discord 入口 `discord.js`，共用 Codex、模型和用量查询逻辑。Telegram 的入口和 `.env` 用法保持不变；Discord 的配置、启动和独立服务见本文“Discord 配置与部署”。
+**[中文文档](#中文文档) | [English Documentation](#english-documentation)**
 
-`v1.5.0` 支持中国大陆非工作日和一天多个时间点提醒，包含周末及官方放假日、排除调休工作日；原有创建、查看、修改和取消保留。TG、Discord 均可使用。Debian 请按 [v1.5.0 升级步骤](UPGRADE-v1.5.0.md) 保留原配置与状态；新增非工作日任务后的状态格式及降级限制见 [日历说明](HOLIDAY-CALENDAR.md)。
+---
 
-远端仓库已更名为 [rshun/codex-bot](https://github.com/rshun/codex-bot)。已有本地及 Debian 目录继续使用 `codex-tg-bot`，服务名和配置路径无需改名。在已有仓库目录中可用以下命令同步远端地址，不会修改代码或重启服务：
+## 中文文档
 
-```bash
-git remote set-url origin git@github.com:rshun/codex-bot.git
-git remote -v
+- [功能亮点](#功能亮点)
+- [快速部署](#快速部署)
+- [环境变量说明](#环境变量说明)
+- [聊天命令一览](#聊天命令一览)
+- [核心功能详解](#核心功能详解)
+  - [消息交互体验与跨平台会话接力](#1-消息交互体验与跨平台会话接力)
+  - [标准发音、找图与收发文件](#2-标准发音找图与收发文件)
+  - [外链安全预抓取与联网搜索](#3-外链安全预抓取与联网搜索)
+  - [系统原生定时任务与本机脚本任务](#4-系统原生定时任务与本机脚本任务)
+  - [本机命令行主动推送 (`codex-bot send`)](#5-本机命令行主动推送-codex-bot-send)
+  - [安全沙箱、目录读写与执行权限](#6-安全沙箱目录读写与执行权限)
+- [升级、测试与故障排查](#升级测试与故障排查)
+
+---
+
+### 功能亮点
+
+- **零 API 账单**：直接复用服务器本机 `codex login` 订阅态，无需配置付费 LLM、语音或图床 API Key。
+- **双平台独立对话 + 一键跨端接力**：普通对话上下文按平台各自独立（在 Telegram 提问就在 Telegram 回复，在 Discord 提问就在 Discord 回复），同时支持通过 `/sessions` 或内联按钮**在 TG 与 Discord 之间一键接力同一段上下文**。
+- **双端自动共享记忆与任务**：长期记忆（`/memory`）与定时任务（`/task`）在 Telegram 与 Discord 之间实时同步共享；定时任务触发时自动双端同时推送。
+- **双维度额度与用量可观测**：提供 `/quota`（通过 `codex app-server` JSON-RPC 实时读取账号 5 小时及周窗口剩余额度）与 `/usage`（结合账号配额与最近一轮 CLI Token 消耗快照 `input` / `cached_input` / `output`）。
+- **多模态开箱即用**：支持多图识别（含 Telegram 相册合并）、联网安全找图、单词/多语种标准 `.mp3` 发音条、外链防 SSRF 正文预抓取（GitHub / X / 网页）、服务器文件安全下发与表情回应。
+- **系统级定时调度 + 零额度脚本任务**：自动对接 Linux `crontab`、macOS `launchd`、Windows 任务计划程序；支持将固定业务脚本（`.py` / `.sh` / 可执行程序）绑定为 `/task script`，到点直接运行脚本，不调 Codex、不耗额度，失败自动双端告警。
+- **本机主动推送 CLI**：提供 `codex-bot send` 子命令，服务器上的监控、量化或业务脚本可直接复用机器人配置向私聊推送文字与报表文件。
+- **纵深安全隔离**：白名单数字 ID 鉴权、子进程敏感环境变量剥离、`~/.codex/sandbox.toml` 禁读黑名单、每轮对话一次性随机端口本地 MCP 令牌。
+
+---
+
+### 快速部署
+
+#### 1. 前置条件
+
+1. 准备一台运行环境（推荐 Debian / Ubuntu Linux，同样支持 macOS 与 Windows），创建一个专用低权限系统用户（例如 `codex`）。
+2. 切换到该用户，安装官方 `codex` CLI 并完成登录认证：
+   ```sh
+   su - codex
+   codex login
+   ```
+3. 创建 Telegram Bot（通过 `@BotFather` 获取 Token）和/或 Discord Bot（在 Discord Developer Portal 创建应用并获取 Bot Token）。
+   - **Discord 私聊配置提示**：Discord 仅处理私聊消息，**无需开启** `Message Content Intent`。将机器人邀请进你所在的任意服务器（勾选 `bot` 与 `applications.commands` 权限范围）后即可向其发起私聊。首次启动注册斜杠命令后可能需要数分钟生效。
+
+#### 2. 获取二进制文件
+
+从 [GitHub Releases](https://github.com/rshun/codex-bot/releases) 下载对应平台预编译静态二进制（附 `SHA256SUMS` 校验文件）：
+
+| 平台 / 架构 | 发布文件名 |
+| :--- | :--- |
+| Linux x86_64 | `codex-bot-linux-amd64`（同 `codex-bot`） |
+| Linux ARM64 | `codex-bot-linux-arm64` |
+| macOS Apple Silicon | `codex-bot-darwin-arm64` |
+| macOS Intel | `codex-bot-darwin-amd64` |
+| Windows x86_64 | `codex-bot-windows-amd64.exe` |
+
+也可以从源码编译：
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o codex-bot ./cmd/codex-bot
 ```
 
-## 运行前检查
+#### 3. 配置文件与 `systemd` 启动（Linux 示例）
 
-需要项目已有的 Node.js 依赖和已登录的 Codex CLI。本次功能没有新增依赖，锁定的依赖版本保持不变。不要把本机安装的 CLI 版本当作 Debian 服务实际使用的版本。
+复制仓库内的 `deploy/codex-tg-bot.env.example` 到 `/etc/codex-tg-bot.env`（注意设置权限仅管理员或服务用户可读，切勿提交真实密钥）：
 
-在 **Bot 实际运行的 Debian 账号** 下检查以下命令。CLI 路径是项目默认值，如果配置了其他 `CODEX_BIN`，请替换为实际路径：
+```dotenv
+# Telegram 与 Discord 可任选其一，或同时配置双平台
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+ALLOWED_USER_IDS=123456789
 
-```bash
-node --version
-/home/codex/.local/bin/codex --version
-/home/codex/.local/bin/codex exec --help
-/home/codex/.local/bin/codex exec resume --help
-/home/codex/.local/bin/codex app-server --help
+DISCORD_BOT_TOKEN=your_discord_bot_token_here
+DISCORD_ALLOWED_USER_IDS=987654321012345678
+
+DATA_DIR=/var/lib/codex-tg-bot
+BOT_ENV_FILE=/etc/codex-tg-bot.env
+DEFAULT_MODEL=gpt-5.4
+CODEX_BIN=codex
+
+WEB_SEARCH=true
+LINK_PREFETCH=true
+ALLOW_SHELL=false
+SHOW_PROGRESS=false
+
+TIMEZONE=Asia/Shanghai
+TASK_LIMIT=20
+TASK_MIN_INTERVAL=60m
+SCRIPT_DIRS=/home/codex/bin
+SCRIPT_TIMEOUT=30m
 ```
 
-当前依赖要求 Node.js 18 或以上；测试使用 Node.js 内置 `node:test`。CLI 的 `exec` 和 `exec resume` 都必须支持 `--json`、`--model`、`--skip-git-repo-check` 和通过 `-` 读取标准输入。版本不兼容时先停止部署，不要直接升级或安装依赖。
+安装二进制与 `systemd` 单元并启动服务（请确认 `deploy/codex-tg-bot.service` 中的 `User=` 与已执行 `codex login` 的系统用户一致）：
 
-Discord 及全量测试要求 Node.js 22.4 或以上，且内置 WebSocket 未关闭；Telegram 运行入口仍支持项目原有 Node 要求。不新增依赖，锁文件不变。先检查 `npm ls node-telegram-bot-api dotenv --depth=0`；显示 `(empty)` 或 `MODULE_NOT_FOUND` 时，必须先恢复项目已有依赖。“无需重装”只适用于依赖已完整安装的机器。
-
-`/quota` 还需要 CLI 提供 `app-server` 的 `initialize`、`account/read` 和 `account/rateLimits/read` 接口。仅有 `app-server --help` 不足以证明账号额度接口可用，部署后需用 `/quota` 验收；不支持时会提示版本或登录方式问题。
-
-## 配置
-
-如果已有 `.env`，先备份，再只补充需要的字段，不要用示例覆盖。首次配置可以复制 `.env.example` 为 `.env`，然后在本地填写实际值；真实配置不能提交到 Git。
-
-| 字段 | 用途 | 默认值 |
-| --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Telegram Bot 凭据 | 必填 |
-| `ALLOWED_USER_ID` | 唯一允许执行任务和修改会话的 Telegram 用户 ID | 必填，正整数 |
-| `CODEX_BIN` | Codex CLI 可执行文件路径 | `/home/codex/.local/bin/codex` |
-| `WORKDIR` | Codex 工作目录，必须已存在 | `/home/codex` |
-| `CODEX_HOME` | Codex 配置、认证与会话存储目录 | 运行账号的 `~/.codex` |
-| `CODEX_MODEL` | Bot 默认模型 ID | 空，交由 CLI 选择 |
-| `CODEX_MODELS` | 逗号分隔的模型白名单 | 空，不限制符合格式的模型 ID |
-| `CODEX_TIMEOUT_MS` | 单轮超时，1000–3600000 毫秒 | `120000` |
-| `SESSION_FILE` | Bot 会话关联文件 | `index.js` 所在目录下的 `.bot-state/sessions.json` |
-| `REMINDER_FILE` | 私聊定时消息状态文件，与会话文件分开 | `SESSION_FILE` 同目录的 `telegram-reminders.json`；Discord 为 `discord-reminders.json` |
-
-`CODEX_MODELS` 是本地白名单，不是对账号模型列表的实时查询。填写账号及 provider 实际支持的模型 ID；若同时设置 `CODEX_MODEL` 和白名单，默认模型也必须在名单中。
-
-兼容性变化：未填写 `ALLOWED_USER_ID` 时，旧版允许所有用户执行任务，新版会拒绝启动。`/id` 仅返回发送者自己的用户 ID，不执行 Codex。
-
-运行时自动创建状态目录及文件，在 Debian 上新建目录使用 `0700`，新建文件使用 `0600`。自定义 `SESSION_FILE` 时，放在私有目录，确保已加入忽略规则。已有目录的权限不会自动修改。不要共享同一个状态文件给多个 Bot 进程；本版只支持单实例。
-
-若 systemd 启用了 `ProtectSystem=strict` 等沙箱设置，需核实 Bot 账号对状态目录及 Codex 会话目录有写入权限。修改 systemd 配置前备份并检查现有策略，不要扩大为全盘可写。
-
-## 使用
-
-从 Bot 项目目录启动，确保 dotenv 能找到该目录内的 `.env`：
-
-```bash
-npm start
+```sh
+sudo install -m 0755 codex-bot /usr/local/bin/codex-tg-bot
+sudo install -d -o codex -g codex /var/lib/codex-tg-bot
+sudo cp deploy/codex-tg-bot.service /etc/systemd/system/codex-tg-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-tg-bot
 ```
 
-不要在生产 Bot 仍运行时启动第二个实例，以免 Telegram polling 冲突和状态竞争。
+---
 
-| Telegram 输入 | 行为 |
-| --- | --- |
-| 普通文本 | 继续当前对话 |
-| `/codex <任务>` | 与普通文本共用当前上下文 |
-| `/start`、`/help` | 查看帮助 |
-| `/model` | 查看当前模型选择 |
-| `/model <模型名>` | 保存模型选择，下次调用传入 `--model`，上下文保留 |
-| `/model default` | 清除会话模型覆盖，使用 `CODEX_MODEL`；若未配置，则交由 CLI 默认及恢复规则决定 |
-| `/models` | 查看配置的白名单，不代表服务端实际可用模型 |
-| `/new` | 清除当前会话关联，下一条消息创建新会话，模型选择保留 |
-| `/status` | 查看模型选择、是否已有上下文，以及空闲或忙碌状态 |
-| `/usage` | 查看当前会话最近一次 CLI 返回的 token 报告 |
-| `/quota` | 查询运行账号的额度窗口、剩余百分比和重置时间 |
-| `/id` | 查看自己的 Telegram 用户 ID |
+### 环境变量说明
 
-`/new` 不删除 Codex 历史文件。模型切换命令只保存选择，账号权限、provider 兼容性及网络将在下次实际调用时验证；`/status` 展示的是请求配置，不是服务端模型确认。明确配置 `CODEX_MODEL` 可以避免依赖 CLI 对默认模型的恢复行为。
+| 变量名 | 必填 | 默认值 | 说明 |
+| :--- | :---: | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | 二选一 | - | Telegram 机器人 Token（与 `DISCORD_BOT_TOKEN` 至少填一个） |
+| `ALLOWED_USER_IDS` | 配 TG 必填 | - | 允许访问的 Telegram 数字用户 ID，多个用英文逗号分隔 |
+| `DISCORD_BOT_TOKEN` | 二选一 | - | Discord 机器人 Token |
+| `DISCORD_ALLOWED_USER_IDS` | 配 DC 必填 | - | 允许访问的 Discord 数字用户 ID，多个用英文逗号分隔 |
+| `DATA_DIR` | 否 | `data` | SQLite 数据库（`bot.db`）、工作区与任务日志存储目录 |
+| `BOT_ENV_FILE` | 否 | `/etc/codex-tg-bot.env` | 环境配置文件路径（自动加入沙箱与发文件黑名单） |
+| `DEFAULT_MODEL` | 否 | `gpt-5.4` | 新会话默认使用的 Codex 模型名称 |
+| `CODEX_MODELS` | 否 | 内置候选集 | `/model` 候选模型列表（英文逗号分隔） |
+| `CODEX_BIN` | 否 | `codex` | `codex` CLI 可执行文件路径 |
+| `CODEX_HOME` | 否 | `~/.codex` | Codex 配置主目录 |
+| `CODEX_AUTH_PATH` | 否 | `~/.codex/auth.json` | Codex 登录凭证路径（自动加入禁读与禁发黑名单） |
+| `CODEX_TIMEOUT` | 否 | `10m` | 单轮 Codex CLI 调用最长超时时间 |
+| `CODEX_MAX_TURNS` | 否 | `50` | 单轮对话允许的最大步数上限 |
+| `QUEUE_LIMIT` | 否 | `8` | 同一聊天允许排队的待处理消息上限 |
+| `WEB_SEARCH` | 否 | `true` | 是否允许 Codex 自主联网搜索与打开网页 |
+| `LINK_PREFETCH` | 否 | `true` | 是否自动安全预抓取消息中的网页/GitHub/X 链接正文 |
+| `ALLOW_SHELL` | 否 | `false` | 启动时初始的服务器命令执行开关（运行中可通过 `/shell` 切换） |
+| `SHOW_PROGRESS` | 否 | `false` | 是否发送并动态编辑「处理中… / 正在搜索…」进度消息 |
+| `TIMEZONE` | 否 | 服务器本地时区 | 定时任务解析与调度的时区（如 `Asia/Shanghai`） |
+| `TASK_LIMIT` | 否 | `20` | 允许保存的定时任务最大数量 |
+| `TASK_MIN_INTERVAL` | 否 | `60m` | 周期性定时任务的最小触发间隔 |
+| `SCRIPT_DIRS` | 否 | `~/bin` | 允许绑定为脚本任务的目录白名单（绝对路径，多个用逗号分隔） |
+| `SCRIPT_TIMEOUT` | 否 | `30m` | 单次脚本任务执行的最长超时时间 |
 
-会话按 `chat_id + message_thread_id + user_id` 隔离，群组话题的回复留在原话题。支持 `/codex@Bot用户名` 等定向命令，忽略指向其他 Bot 的命令。群组中普通消息能否被接收，仍受 Telegram privacy mode 限制。
+---
 
-同一会话运行时，后续任务、`/new` 和模型修改会收到忙碌提示；**不会排队，也不会自动重试**，请等待回复后重发。`/status`、`/usage`、`/quota` 和其他只读命令仍可使用。不同会话可以并行，但共享 `WORKDIR` 下的文件，不具备文件系统隔离。
+### 聊天命令一览
 
-## 用量查询
+所有主要命令均提供 **Telegram & Discord 交互式内联按钮**，大多数管理操作也可直接使用自然语言触发：
 
-`/usage` 展示最近一次任务的 CLI `turn.completed.usage` 报告：输入、缓存输入、输出、推理输出，以及输入加输出。数据随当前会话保存在 `SESSION_FILE` 中，重启后保留，切换模型不清除；`/new` 清除当前会话的报告。
+| 命令 | 用法与说明 |
+| :--- | :--- |
+| `/status` | 查看运行状态、版本、调度器状态、权限开关、数据统计与 MCP 概览（附快捷操作面板按钮） |
+| `/stop` | 立即中断当前正在运行的对话或长任务（同 `/cancel`，或运行中直接发「停止」「停一下」） |
+| `/new [备注]` | 归档当前会话并开启新话题（长期记忆继续保留，附一键切回按钮） |
+| `/sessions` | 查看跨平台保存的历史会话；`/sessions <编号>` 一键切换/跨端接力；`/sessions del <编号>` 删除归档 |
+| `/model [模型名]` | 查看当前模型与 CLI 可用模型列表（附点选切换按钮），切换模型保留当前上下文 |
+| `/usage` | 查询当前订阅周期剩余额度及最近一轮 CLI Token 用量明细 |
+| `/quota` | 实时查询 ChatGPT/Codex 账号窗口剩余配额百分比与重置时间 |
+| `/memory` | 查看跨平台共享长期记忆；支持 `add <内容>`、`del <编号>`、`clear`，或直接说「长期记忆：…」 |
+| `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`cron`、`script`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
+| `/mcp` | 管理 MCP 服务：`/mcp` 列表、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
+| `/dir` | 查看可写目录白名单；`/dir add rw /绝对路径` 授权写入；`/dir del /绝对路径` 收回权限（或直接说「允许写入 /srv/out」） |
+| `/shell` | 查看或切换命令执行权限（`/shell on` / `/shell off`，或直接说「开启命令执行」「关闭命令执行」） |
+| `/reset` | 清空当前聊天的上下文关联并换新会话（长期记忆永久保留） |
+| `/help` | 查看命令帮助说明 |
 
-这是 **CLI 最近返回的统计快照**。缓存输入不再次与输入相加，推理输出也不额外加入输入加输出。本版不把恢复会话时返回的报告重复累加，不提供跨任务、今日或历史总量，也不从旧会话文件补录。官方事件格式并未在这里验证不同 Debian CLI 版本的累计口径，所以不能把这个快照保证为单条 Telegram 消息的独立消耗。
+---
 
-任务失败、超时或没有返回有效统计时，记录结果状态，缺失字段显示“未知”，不能当成 0；失败任务不会继续显示前一任务的数字。任务运行中查询时，会明确显示的是上次保存的报告。用量写入失败会保留任务回答并提示检查状态目录权限，暂停该会话进一步执行；原上下文及状态文件不主动删除。
+### 核心功能详解
 
-`/quota` 启动短期 `codex app-server` 子进程，完成初始化后通过 `account/read` 检查登录方式，再读取 `account/rateLimits/read`。它使用与任务执行一致的 `CODEX_BIN`、服务账号和 `CODEX_HOME`。
+#### 1. 消息交互体验与跨平台会话接力
 
-返回的数据包含各额度组的主窗口与次窗口：窗口时长、已用百分比、剩余百分比和重置时间。优先展示 `rateLimitsByLimitId` 的多个额度组，旧接口仅返回 `rateLimits` 时兼容单组数据；剩余百分比按 `100 - usedPercent` 计算并限制在 0–100%。缺失值显示“未知”。所有查询和重置时间按北京时间展示，窗口长度使用服务器实际返回值，不固定写成 5 小时或每周。
+- **轻量接收反馈与精准引用**：收到普通消息后，Telegram 自动在原消息上添加 👀 表情回应，Discord 显示正在输入状态，不刷固定文字回执。回复（包括超长消息自动切分的每一段、排队提示及错误提示）均精准引用触发它的原消息；若原消息已被删除则自动降级为普通回复。
+- **串行消息队列**：同一会话内的消息严格按序处理。仅当前面仍有未完成消息时提示「已排队，前面还有 N 条。」；超出 `QUEUE_LIMIT` 时提示稍后重发。
+- **可选动态进度（`SHOW_PROGRESS=true`）**：开启后先发送一条「处理中…」，在 Codex 搜索或调用工具时动态编辑为「正在搜索：…」「正在调用：…」（节流间隔 3 秒），完成后直接将该消息替换为最终回答。
+- **跨平台会话接力（`/sessions`）**：历史会话带有 `[来自 TG]` / `[来自 Discord]` 来源标记。你在电脑端 Discord 聊到一半的话题，出门后可在手机 Telegram 发送 `/sessions` 点击对应按钮无缝接力同一段上下文。
 
-这是账号在多个客户端间共享的额度，不能与 token 数直接换算。当前仅支持 `account/read` 返回的 ChatGPT 账号；API Key、Bedrock、第三方 provider 或未登录账号会得到明确提示，不伪造剩余数值。不会显示账号邮箱、凭据或原始 RPC 错误内容。
+#### 2. 标准发音、找图与收发文件
 
-额度查询默认等待最多 15 秒；查询结束会关闭子进程，忽略 EOF 时 1 秒后发送 `SIGTERM`，再等 1 秒必要时发送 `SIGKILL`。并发 `/quota` 请求共享同一次查询，结束后的下一次命令重新读取，不使用陈旧缓存。查询只使用初始化和账号读取方法，不启动模型任务、不消费重置券、不修改 Bot 会话关联。
+- **标准语音发音（`codexbot__pronounce`）**：询问单词、短语或句子发音（如「entrepreneur 怎么读？」「对比 schedule 的英美发音」），机器人会给出国际音标（IPA）与发音要点，并直接下发可内联点击播放的 `.mp3` 语音条。英文单词优先拉取词典级真人播音录音（区分 `en-US` / `en-GB`），长句及多语种（中、英、日、韩、法、德、西等）自动切换标准播音级 TTS。
+- **安全联网找图（`codexbot__send_web_image`）**：联网找图通过服务端防 SSRF 客户端下载并校验真实图片魔数（JPG/PNG/WebP/GIF）与清晰度尺寸，拒绝裂图与追踪像素。内置内容安全过滤，并预留 `media.ImageAuditor` 视觉终审扩展接口。
+- **接收图片与附件**：支持发送压缩照片或原图文件（JPEG/PNG/GIF/WebP，每条消息最多 10 张、单张上限 10MB；Telegram 多图相册自动合并为单次提问），临时文件以 `0600` 权限写入 `DATA_DIR/inbox` 并在当轮结束后立即清理。
+- **下发本机文件（`codexbot__send_file`）与表情回应（`codexbot__react`）**：可直接说「把 `/srv/out/report.pdf` 发给我」（每轮最多 10 个文件，Telegram 单文件上限 50MB，Discord 上限 10MB），或由 Codex 根据语境在你的消息上添加表情回应（如 👍）。
 
-这两个命令无需新增 `.env` 字段或依赖。仅允许 `ALLOWED_USER_ID` 使用，群组命令支持 `@Bot用户名` 和原话题回复。
+#### 3. 外链安全预抓取与联网搜索
 
-## 私聊定时消息
+- **外链自动预抓取（`LINK_PREFETCH=true`）**：消息中包含 `http://` 或 `https://` 链接时（单条消息最多提取前 3 个），机器人在调用 Codex 前会自动通过内置防 SSRF 客户端（拦截回环地址、RFC1918 局域网、CGNAT、Link-Local 等内网网段）抓取上下文：
+  - **GitHub**：自动解析 PR、Issue、Commit、Blob 源码链接并提取标题、正文、变更统计与代码内容。
+  - **X / Twitter**：自动识别 `x.com/.../status/...` 推文链接，提取作者、正文、长文标题及引用推文。
+  - **普通网页 / JSON / 文本**：自动提取网页标题与去噪后的正文摘要。
+- **自主联网搜索（`WEB_SEARCH=true`）**：默认开启，通过 `--search` 允许 Codex 按需检索外部最新资料。
 
-支持 TG 和 Discord 在指定时间主动发送保存的文字，任务由 Bot 自己调度并持久化，不需要修改 Debian cron、安装依赖或放开 Codex 写入权限。普通提醒到点只发送固定文字，不消耗模型用量。请先与 Bot 建立私聊，所有创建、查看、取消操作只接受当前配置的授权用户，不能在群组或服务器频道管理，也不能指定其他收件人。
+#### 4. 系统原生定时任务与本机脚本任务
 
-所有时间固定为 **北京时间（UTC+08:00）**，与 Debian 系统时区无关。私聊中发送以下命令，示例日期须替换成未来日期：
+##### Codex 智能定时任务
+直接发送 `/task 每天早上 8:30 汇总今日科技要闻`（或在普通对话中自然语言描述），Codex 会自动解析为一次性、每天、每周、工作日（周一至周五）、每月几号、月末最后一天、固定分钟间隔或标准 5 段 Cron 表达式。
+
+- **操作系统原生调度器驱动**（无需依赖进程内内存轮询）：任务变更时自动同步到当前系统调度服务，到点由系统直接调起 `codex-bot run-task <编号> --data-dir <目录> --env-file <配置>`：
+  - **Linux / Unix**：托管写入当前用户的 `crontab`（`# BEGIN CODEX-BOT TASKS` ... `# END CODEX-BOT TASKS`）。
+  - **macOS**：写入 `~/Library/LaunchAgents/com.codexbot.task.<编号>.plist` 并通过 `launchctl` 加载。
+  - **Windows**：注册至系统任务计划程序（`\CodexBot\Task_<编号>`）。
+- 每次触发均使用独立会话，不污染日常聊天上下文，结果以 `⏰ 定时任务 #编号` 双端推送到 Telegram 与 Discord。
+
+##### 本机脚本任务（`/task script` / `/task bind`）
+对于逻辑固定或耗时的自动化任务（如定时下单、数据采集、日报生成），可直接绑定本机脚本执行，**不调用 Codex、不占会话、零额度消耗**：
 
 ```text
-/remind 2026-10-19 09:00 喝水
-/remind daily 21:30 准备休息
-/reminders
-/cancelreminder 任务ID
+# 新建脚本任务：5 段 Cron + 脚本绝对路径（不得含空格）+ 可选任务说明
+/task script 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py 工作日早餐自动下单
+
+# 将已有的 #3 定时任务切换为运行本机脚本（执行时间保持不变）
+/task bind 3 /home/codex/bin/auto_breakfast.py
+
+# 解绑脚本，恢复为普通 Codex 提示词任务
+/task unbind 3
 ```
 
-`/remind` 指定日期时只发送一次；`daily` 每天发送，当天时间已到则从次日开始。保存成功后返回 8 位任务 ID、下一次发送时间和内容；`/reminders` 和“查看目前所有定时任务及当前状态”显示当前平台全部保存记录、总数、各状态数量及最近发送结果，超过单条平台消息长度时分段发送。列表包含待发送、已暂停、生成/发送中、已发送、发送未确认、已取消、日历待更新和模型生成失败，不再只显示最近20条。内容上限 1000 字符，环境凭据会在保存及发送前脱敏；不要在提醒中放真实密钥或密码。`/new` 不取消或恢复定时消息。
+- **执行规则**：`.py` 使用 `python3`（Windows 优先 `python`），`.sh` 使用 `/bin/sh`，其余文件需具备可执行权限；工作目录为脚本所在目录，超时上限为 `SCRIPT_TIMEOUT`（默认 `30m`）。
+- **目录白名单与防篡改**：仅允许绑定 `SCRIPT_DIRS`（默认 `~/bin`）目录下的脚本；校验软链接真实路径，拒绝全局可写（world-writable）文件；仅认用户本人显式发送的 `/task script` 或 `/task bind` 命令，Codex 自然语言解析无权绑定或替换脚本。
+- **静默成功与失败告警**：退出码为 `0` 时机器人不额外发消息（由脚本按需调用 `"$CODEX_BOT_BIN" send` 主动推送）；退出码非 `0` 或超时时，机器人自动截取末尾输出双端推送告警。完整日志保存在 `<DATA_DIR>/task-logs/task-<编号>.log`（满 2MB 自动轮转）。
+- **无密钥注入环境**：脚本运行环境自动剥离 Bot Token 与用户白名单，并注入 `CODEX_BOT_BIN`、`BOT_ENV_FILE`、`DATA_DIR`、`CODEX_BOT_TASK_ID`。
 
-**统一语义提醒（v1.6.0）：** TG 和 Discord 私聊的普通消息通过当前 Codex 会话理解，再由 Bot 校验和执行。没有固定话术要求，也没有额外的分类模型调用。例如：
+#### 5. 本机命令行主动推送 (`codex-bot send`)
+
+服务器上的外部脚本、定时任务或监控程序无需另写机器人客户端，直接调用 `codex-bot send` 即可推送消息与附件（自动探测程序目录或 `/etc/codex-tg-bot.env` 配置，并复用发文件安全黑名单校验）：
+
+```sh
+# 1. 默认同时推送到所有已配置平台（Telegram + Discord）的最近活跃私聊
+codex-bot send "盘前检查完成：今日无异常"
+
+# 2. 仅推送到指定平台（-p tg 或 -p dc）
+codex-bot send -p tg "仅发送到 Telegram"
+codex-bot send -p dc "仅发送到 Discord"
+
+# 3. 推送文字并附带本机报表文件（支持多次指定 -f / --file）
+codex-bot send "今日成交报表" -f /srv/reports/fills.csv
+
+# 4. 通过标准输入管道推送命令输出
+df -h | codex-bot send
+```
+
+#### 6. 安全沙箱、目录读写与执行权限
+
+- **环境变量隔离**：`codex-bot` 启动 `codex` 子进程前会剥离 `TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`BOT_ENV_FILE` 等敏感变量，即使子进程读取 `/proc/self/environ` 也无法获取机器人凭证。
+- **目录读写控制（Linux / macOS）**：
+  - **读取**：受操作系统用户权限与沙箱黑名单双重控制。`~/.codex/auth.json`、`~/.ssh`、`BOT_ENV_FILE`、`bot.db`、所有 `*.env` 与 `*.pem` 私钥文件一律禁止读取与外发。
+  - **写入**：默认只读（`--sandbox read-only`）。必须由你本人在聊天中发送 `/dir add rw /srv/out` 或明确说「允许写入 `/srv/out`」才会持久化授权（严禁授权 `/`、`/etc`、`/proc`、`/sys`、`/root`、`~/.codex`、`~/.ssh`、`DATA_DIR` 等敏感路径）。
+  - **沙箱配置托管**：自动维护 `~/.codex/sandbox.toml`（首行标记 `# managed by codex-bot; do not edit`，若已存在手动配置则绝不覆盖）。
+- **命令执行开关（`/shell`）**：默认关闭（`ALLOW_SHELL=false`），需要时可通过 `/shell on` 临时开启，用完建议 `/shell off` 关闭。
+- **本地一次性 MCP 通道**：表情回应、发文件、标准发音与安全找图通过监听在 `127.0.0.1` 随机端口的内置 MCP 服务实现（配置写入独立的 `DATA_DIR/workspace/.codex/config.toml`，不改动全局 `~/.codex/config.toml`），每轮对话签发一次性随机令牌且仅限操作当前会话。
+
+> [!IMPORTANT]
+> **部署安全建议**：由于 Codex 具备读取运行用户可读文件及联网访问网页的能力，为防范恶意网页提示词注入诱导读取本机文件，**请务必使用专用的低权限系统用户（如 `codex`）运行本服务**，不要与存放生产核心密钥的 `root` 或高权限账号混用。
+
+---
+
+### 升级、测试与故障排查
+
+#### 平滑升级与备份
+
+升级前建议先备份 `bot.db` 数据库（升级仅替换二进制程序，会话上下文、长期记忆与定时任务均完整保留）：
+
+```sh
+# 1. 停止服务并备份数据库
+sudo systemctl stop codex-tg-bot
+sudo cp -p /var/lib/codex-tg-bot/bot.db /var/lib/codex-tg-bot/bot.db.bak-$(date +%Y%m%d)
+
+# 2. 使用内置升级脚本（需已登录 gh CLI）或手动替换新二进制后启动
+sudo sh deploy/upgrade.sh
+# 若手动替换二进制，执行：sudo systemctl start codex-tg-bot
+```
+
+> 如需回滚，停止服务后恢复旧版二进制并重启即可。
+
+#### 离线回归测试
+
+本地已具备 Go 模块缓存时，可禁用外网下载运行全量单元测试：
+
+```sh
+# Linux / macOS
+GOTOOLCHAIN=local GOPROXY=off go test -mod=readonly ./...
+```
+
+```powershell
+# Windows PowerShell
+$env:GOTOOLCHAIN = 'local'
+$env:GOPROXY = 'off'
+go test -mod=readonly ./...
+```
+
+#### 常见故障排查
+
+- **提示 `unknown model` 或模型不可用**：表示当前会话绑定的模型名称在当前 `codex` CLI 版本或订阅中不可用。请在报错平台发送 `/model` 查看当前候选模型列表，再点击按钮或发送 `/model <可用模型名>` 切换即可（**切勿先发 `/reset`**，切换模型可直接保留原有会话上下文）。
+- **排查 CLI 与服务日志**：可在服务器以只读方式检查 `codex --version` 及 `sudo journalctl -u codex-tg-bot -n 60 --no-pager`（对外分享日志前请注意脱敏隐藏 Token、Session ID 与用户 ID）。
+
+---
+---
+
+## English Documentation
+
+- [Highlights](#highlights)
+- [Quick Start & Deployment](#quick-start--deployment)
+- [Environment Variables](#environment-variables)
+- [Chat Commands](#chat-commands)
+- [Feature Deep Dive](#feature-deep-dive)
+  - [Messaging UX & Cross-Platform Session Handoff](#1-messaging-ux--cross-platform-session-handoff)
+  - [Pronunciation Audio, Web Image Search & File Sharing](#2-pronunciation-audio-web-image-search--file-sharing)
+  - [SSRF-Safe Link Prefetch & Web Search](#3-ssrf-safe-link-prefetch--web-search)
+  - [OS-Native Scheduled Tasks & Script Tasks](#4-os-native-scheduled-tasks--script-tasks)
+  - [Proactive CLI Notifications (`codex-bot send`)](#5-proactive-cli-notifications-codex-bot-send)
+  - [Security Architecture, Sandbox & Permissions](#6-security-architecture-sandbox--permissions)
+- [Upgrade, Testing & Troubleshooting](#upgrade-testing--troubleshooting)
+
+---
+
+### Highlights
+
+- **Zero API Token Billing**: Runs directly on top of an authenticated local `codex` CLI subscription (`codex login`). No pay-per-token LLM, TTS, or image-hosting API keys needed.
+- **Per-Platform Contexts + One-Click Cross-Platform Handoff**: Regular conversations stay independent on Telegram and Discord by default, while `/sessions` (and interactive inline buttons) let you **hand off and continue any conversation seamlessly between Telegram and Discord**.
+- **Shared Long-Term Memory & Dual-Platform Tasks**: Long-term memories (`/memory`) and scheduled tasks (`/task`) are automatically shared across Telegram and Discord, with scheduled task results delivered to both platforms simultaneously.
+- **Dual Quota & Token Observability**: Check live account rate-limit windows via `/quota` (`codex app-server` JSON-RPC) and inspect both account quota and the latest turn's token breakdown (`input`, `cached_input`, `output`) via `/usage`.
+- **Rich Multimodal Capabilities**: Multi-image vision (including Telegram album merging), SSRF-safe web image fetching, IPA + inline `.mp3` pronunciation audio bars, SSRF-safe link prefetching (GitHub, X/Twitter, articles), local file delivery, and contextual emoji reactions.
+- **OS-Native Task Scheduler + Zero-Quota Script Tasks**: Synchronizes tasks natively with Linux `crontab`, macOS `launchd`, and Windows Task Scheduler. Bind deterministic jobs (`.py`, `.sh`, or binaries) via `/task script` to run directly without invoking Codex or consuming quota — silent on success, automatic dual-platform alerts on failure.
+- **Built-In Push CLI (`codex-bot send`)**: Send messages or local report files to your Telegram/Discord DMs straight from server cron jobs, monitoring scripts, or Unix pipes.
+- **Defense-in-Depth Security**: Strict numeric user ID allowlists, child-process secret environment scrubbing, `~/.codex/sandbox.toml` file deny lists, and ephemeral per-turn random-port localhost MCP tokens.
+
+---
+
+### Quick Start & Deployment
+
+#### 1. Prerequisites
+
+1. A host machine (Debian/Ubuntu Linux recommended; macOS and Windows are also supported) with a dedicated unprivileged system user (e.g., `codex`).
+2. Install the official `codex` CLI and log in under that system user:
+   ```sh
+   su - codex
+   codex login
+   ```
+3. Create a Telegram Bot via `@BotFather` and/or a Discord Bot via the Discord Developer Portal.
+   - **Discord DM Setup**: `codex-bot` operates exclusively in Direct Messages and **does not require** the `Message Content Intent`. Invite the bot to any server you share using scopes `bot` and `applications.commands` so you can DM it. Newly registered slash commands may take a few minutes to propagate on first run.
+
+#### 2. Download or Build the Binary
+
+Download a prebuilt static binary from [GitHub Releases](https://github.com/rshun/codex-bot/releases) (verified via `SHA256SUMS`):
+
+| OS / Architecture | Release Artifact |
+| :--- | :--- |
+| Linux x86_64 | `codex-bot-linux-amd64` (alias: `codex-bot`) |
+| Linux ARM64 | `codex-bot-linux-arm64` |
+| macOS Apple Silicon | `codex-bot-darwin-arm64` |
+| macOS Intel | `codex-bot-darwin-amd64` |
+| Windows x86_64 | `codex-bot-windows-amd64.exe` |
+
+Or build from source:
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o codex-bot ./cmd/codex-bot
+```
+
+#### 3. Configure & Run with `systemd` (Linux)
+
+Copy `deploy/codex-tg-bot.env.example` to `/etc/codex-tg-bot.env` (restrict file permissions and never commit real credentials):
+
+```dotenv
+# Configure Telegram, Discord, or both
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+ALLOWED_USER_IDS=123456789
+
+DISCORD_BOT_TOKEN=your_discord_bot_token_here
+DISCORD_ALLOWED_USER_IDS=987654321012345678
+
+DATA_DIR=/var/lib/codex-tg-bot
+BOT_ENV_FILE=/etc/codex-tg-bot.env
+DEFAULT_MODEL=gpt-5.4
+CODEX_BIN=codex
+
+WEB_SEARCH=true
+LINK_PREFETCH=true
+ALLOW_SHELL=false
+SHOW_PROGRESS=false
+
+TIMEZONE=Asia/Shanghai
+TASK_LIMIT=20
+TASK_MIN_INTERVAL=60m
+SCRIPT_DIRS=/home/codex/bin
+SCRIPT_TIMEOUT=30m
+```
+
+Install the binary and `systemd` unit (ensure `User=` in `deploy/codex-tg-bot.service` matches the user that ran `codex login`):
+
+```sh
+sudo install -m 0755 codex-bot /usr/local/bin/codex-tg-bot
+sudo install -d -o codex -g codex /var/lib/codex-tg-bot
+sudo cp deploy/codex-tg-bot.service /etc/systemd/system/codex-tg-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-tg-bot
+```
+
+---
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+| :--- | :---: | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | Either | - | Telegram Bot token (at least one of Telegram or Discord is required) |
+| `ALLOWED_USER_IDS` | If TG enabled | - | Comma-separated numeric Telegram user IDs allowed to use the bot |
+| `DISCORD_BOT_TOKEN` | Either | - | Discord Bot token |
+| `DISCORD_ALLOWED_USER_IDS` | If DC enabled | - | Comma-separated numeric Discord user IDs allowed to use the bot |
+| `DATA_DIR` | No | `data` | Directory for SQLite (`bot.db`), workspace, and task logs |
+| `BOT_ENV_FILE` | No | `/etc/codex-tg-bot.env` | Path to the bot `.env` file (automatically blocked from Codex reads/sends) |
+| `DEFAULT_MODEL` | No | `gpt-5.4` | Default Codex model for new chat sessions |
+| `CODEX_MODELS` | No | Built-in list | Comma-separated candidate models shown in `/model` |
+| `CODEX_BIN` | No | `codex` | Path or name of the `codex` CLI executable |
+| `CODEX_HOME` | No | `~/.codex` | Codex configuration home directory |
+| `CODEX_AUTH_PATH` | No | `~/.codex/auth.json` | Codex auth file path (blocked from reads/sends) |
+| `CODEX_TIMEOUT` | No | `10m` | Maximum timeout per Codex CLI turn |
+| `CODEX_MAX_TURNS` | No | `50` | Maximum tool-use turns per message |
+| `QUEUE_LIMIT` | No | `8` | Maximum queued messages per chat |
+| `WEB_SEARCH` | No | `true` | Allow Codex to search the web and open pages autonomously |
+| `LINK_PREFETCH` | No | `true` | Automatically prefetch URLs in incoming messages via an SSRF-safe client |
+| `ALLOW_SHELL` | No | `false` | Initial shell execution state on startup (toggleable live via `/shell`) |
+| `SHOW_PROGRESS` | No | `false` | Show and dynamically edit a live progress message during tool/search steps |
+| `TIMEZONE` | No | System local TZ | IANA timezone for scheduled tasks (e.g., `Asia/Shanghai`, `America/New_York`) |
+| `TASK_LIMIT` | No | `20` | Maximum number of scheduled tasks stored |
+| `TASK_MIN_INTERVAL` | No | `60m` | Minimum interval allowed for recurring scheduled tasks |
+| `SCRIPT_DIRS` | No | `~/bin` | Comma-separated absolute directories allowed for `/task script` bindings |
+| `SCRIPT_TIMEOUT` | No | `30m` | Maximum execution duration for a single script task run |
+
+---
+
+### Chat Commands
+
+All major commands include **interactive inline buttons** on both Telegram and Discord, and most settings can also be managed in plain natural language:
+
+| Command | Description |
+| :--- | :--- |
+| `/status` | View bot version, runtime status, OS scheduler state, permission flags, stats, and MCP overview (with quick-action buttons) |
+| `/stop` | Immediately abort the currently running response or task (alias: `/cancel`, or send `"停止"` while running) |
+| `/new [note]` | Archive the current session and start a fresh topic (long-term memories remain intact; includes a one-click switch-back button) |
+| `/sessions` | List saved sessions across TG & Discord; `/sessions <id>` to switch or hand off cross-platform; `/sessions del <id>` to delete |
+| `/model [name]` | View current and available models (with one-click selection buttons); switching models preserves chat context |
+| `/usage` | Check remaining Codex subscription quota and latest turn CLI token usage |
+| `/quota` | Query live ChatGPT/Codex rate-limit windows and reset times via `codex app-server` |
+| `/memory` | View shared long-term memories; supports `add <text>`, `del <id>`, `clear`, or natural language |
+| `/task` | Manage scheduled & script tasks (`<natural language>`, `cron`, `script`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
+| `/mcp` | Manage MCP servers: `/mcp` list, `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
+| `/dir` | View writable directories; `/dir add rw /abs/path` to grant write access; `/dir del /abs/path` to revoke |
+| `/shell` | View or toggle server command execution (`/shell on` / `/shell off`) |
+| `/reset` | Clear the current chat's session binding and start fresh (shared `/memory` entries are preserved) |
+| `/help` | Display command reference |
+
+---
+
+### Feature Deep Dive
+
+#### 1. Messaging UX & Cross-Platform Session Handoff
+
+- **Lightweight Receipts & Exact Quote-Replies**: Incoming messages receive an instant 👀 reaction on Telegram or a typing indicator on Discord without cluttering the chat with fixed receipt messages. Every response (including multi-chunk splits for long replies, queue notices, and error alerts) quote-replies the exact triggering message, gracefully falling back if the original message was deleted.
+- **Per-Chat Serial Queue**: Messages in the same chat are processed strictly in order. Queue notices appear only when another turn is already active, up to `QUEUE_LIMIT`.
+- **Optional Live Progress (`SHOW_PROGRESS=true`)**: When enabled, sends an initial status message and updates it every >= 3s as Codex searches or invokes tools, replacing it in place with the final answer.
+- **Cross-Platform Handoff (`/sessions`)**: Archived and active sessions display `[来自 TG]` / `[来自 Discord]` tags so you can start a debugging thread on Discord desktop and pick up the exact same session on Telegram mobile.
+
+#### 2. Pronunciation Audio, Web Image Search & File Sharing
+
+- **Standard Pronunciation (`codexbot__pronounce`)**: Ask how to pronounce any word, phrase, or sentence. Codex replies with IPA phonetic transcription, pronunciation tips, and an inline playable `.mp3` audio bar — pulling studio human dictionary recordings for single English words (`en-US` / `en-GB`) and broadcast-quality multilingual TTS for phrases and sentences.
+- **Safe Web Images (`codexbot__send_web_image`)**: Web image requests are fetched server-side via an SSRF-safe client that validates magic bytes (`JPG`/`PNG`/`WebP`/`GIF`) and minimum dimensions, with a `media.ImageAuditor` interface hook reserved for visual post-auditing.
+- **Image Vision & Local File Delivery**: Send up to 10 photos or uncompressed image files (<= 10MB each; Telegram media albums are automatically merged into one turn). Ask Codex to send local server files via `codexbot__send_file` (up to 10 files/turn; 50MB limit on Telegram, 10MB on Discord) or react to your message with an emoji via `codexbot__react`.
+
+#### 3. SSRF-Safe Link Prefetch & Web Search
+
+- **Automatic Link Prefetch (`LINK_PREFETCH=true`)**: Extracts up to 3 `http://` or `https://` URLs per message and prefetches clean context before calling Codex, while blocking loopback, RFC1918 private networks, CGNAT, and link-local addresses:
+  - **GitHub**: Pulls PR, Issue, Commit, and Blob metadata, diffs, file lists, or source text.
+  - **X / Twitter**: Extracts post author, full text, article titles, and quoted posts from `x.com/.../status/...` links.
+  - **General Web / JSON / Text**: Extracts `<title>` and readable main content.
+- **Autonomous Web Search (`WEB_SEARCH=true`)**: Enabled by default so Codex can search and browse external documentation as needed.
+
+#### 4. OS-Native Scheduled Tasks & Script Tasks
+
+##### AI Scheduled Tasks
+Create tasks in natural language (e.g., `/task Summarize top tech news every weekday at 8:30 AM`) or with explicit 5-field cron syntax (`/task cron 30 8 * * 1-5 ...`).
+
+- **OS-Native Scheduling**: Instead of relying on an in-memory ticker, `codex-bot` registers tasks directly with the host OS scheduler to invoke `codex-bot run-task <id> --data-dir <dir> --env-file <env>`:
+  - **Linux / Unix**: Managed block inside the service user's `crontab` (`# BEGIN CODEX-BOT TASKS` ... `# END CODEX-BOT TASKS`).
+  - **macOS**: `~/Library/LaunchAgents/com.codexbot.task.<id>.plist` via `launchctl`.
+  - **Windows**: Windows Task Scheduler under `\CodexBot\Task_<id>`.
+- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to both Telegram and Discord.
+
+##### Local Script Tasks (`/task script` / `/task bind`)
+Offload deterministic or long-running jobs (e.g., automated ordering, scrapers, ETL reports) to local scripts while managing their schedule from chat — **zero Codex invocations and zero quota usage**:
 
 ```text
-每晚九点叫我喝水
-设一个喝水提醒，每天晚上九点
-把刚才那个改到晚上十点
-看看我还有哪些安排
-取消刚才的喝水提醒
-非工作日早上六点一分和十一点二分，发测试消息给我
-暂停喝水提醒
-恢复喝水提醒
-恢复提醒 任务ID，时间改为明天早上八点半
-展示所有定时任务及当前状态
+# Create a new script task: 5-field cron + script absolute path (no spaces) + optional label
+/task script 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py Weekday breakfast order
+
+# Bind an existing task #3 to run a local script (schedule stays unchanged)
+/task bind 3 /home/codex/bin/auto_breakfast.py
+
+# Unbind script and restore #3 back to a Codex prompt task
+/task unbind 3
 ```
 
-支持创建、查看、修改时间/内容及取消，单次最多 8 条同类操作，全部校验后一次保存；混合创建、修改、取消需分次提出。沿用单次、每天、中国大陆非工作日三种规则，统一北京时间、分钟精度；每周/每月、其他时区/收件人及跨平台发送尚不支持。信息不完整或候选不明确时应先追问。模型理解不能保证完全正确，应以实际 Bot 回执的任务 ID、规则、时间和内容为准，使用 `/reminders` 核对。
+- **Execution**: `.py` runs via `python3` (`python` first on Windows), `.sh` via `/bin/sh`, and other files directly as executables inside the script's directory, bounded by `SCRIPT_TIMEOUT` (default `30m`).
+- **Strict Path Allowlist**: Scripts must reside inside `SCRIPT_DIRS` (default `~/bin`), pass realpath symlink resolution, and not be world-writable. Only explicit user commands (`/task script` / `/task bind`) can bind scripts — natural-language Codex parsing cannot create or swap script bindings.
+- **Silent Success & Automatic Failure Alerts**: On exit code `0`, the bot stays quiet so the script can push custom notifications via `"$CODEX_BOT_BIN" send`. On non-zero exit or timeout, the bot pushes the trailing output as an alert to both Telegram and Discord. Full output is logged to `<DATA_DIR>/task-logs/task-<id>.log` (2MB rotation).
+- **Scrubbed Environment**: Bot tokens and user allowlists are stripped from the script's environment; `CODEX_BOT_BIN`, `BOT_ENV_FILE`, `DATA_DIR`, and `CODEX_BOT_TASK_ID` are provided automatically.
 
-v1.9.0新增自然语言暂停/恢复，TG和Discord的普通提醒、TG的模型提醒均支持。暂停保留ID、时间、内容、模型选择及历史，不发送、不触发后台模型；状态持久保存，重启和修改内容/时间都不会自动恢复。循环任务恢复时只安排当前时间后的下一次，不补发暂停期间的消息；过期单次任务须明确指定新的未来时间。正在生成/发送的一轮不能暂停或撤回，需等完成后再暂停后续任务；已取消或结束的任务不能恢复。候选不唯一时先追问ID，不批量猜测。暂停任务仍占用原50个未结束任务名额，可继续取消；自然语言管理沿用当前会话忙碌保护。Discord无需重新注册斜杠命令。此能力从v1.9.0提供。
+#### 5. Proactive CLI Notifications (`codex-bot send`)
 
-自然语言现在会调用模型并使用原会话上下文、模型选择和用量报告；同一会话忙碌时需等待。原生命令 `/remind`、`/reminders`、`/cancelreminder` 不依赖模型，忙碌时仍能使用。普通提醒到点不调用模型。`/codex` 显式普通任务不执行结构化提醒操作；`/new` 清除会话及回执上下文，保留提醒。
+External scripts, cron jobs, and monitoring hooks on the same host can push messages and files to your DMs without needing separate bot credentials:
 
-TG 私聊可明确要求“每天早上9点调用模型生成一句简短早安问候并发给我”，每次触发独立生成；未要求调用模型的新提醒仍发送固定文字。查看、修改和取消继续走现有自然语言操作。该能力的失败处理、模型选择、用量及版本 3 状态兼容性见 [模型提醒说明](MODEL-REMINDERS.md)。
+```sh
+# 1. Push to all configured platforms (Telegram + Discord)
+codex-bot send "Pre-market check passed with zero anomalies"
 
-模型提出操作后，Bot 校验字段、任务 ID、未来时间、日历和状态；处理期间任务发生变化会拒绝写入。仅在 Bot 返回“已保存/已修改/已取消”、任务 ID 及实际计划后才表示操作成功。失败或格式异常不会自动退回普通文字中的“已创建”声明。CLI 首次和恢复会话均需支持 `--output-schema`，不兼容时会阻止普通消息处理，部署前必须核对。无需新增依赖或配置。详细设计、成本、追问、验证与回滚见 [统一语义提醒说明](SEMANTIC-REMINDERS.md)，运行包升级见 [Debian v1.6.0 升级文档](UPGRADE-v1.6.0.md)。旧版有限句式及发布版本边界以各版升级文档为准。
+# 2. Target a specific platform (-p tg or -p dc)
+codex-bot send -p tg "Telegram only notification"
+codex-bot send -p dc "Discord only notification"
 
-内置离线日历当前覆盖 **2026 年**，按官方放假、调休安排判断；不新增依赖、不在定时发送时查询网络。可用可选 `HOLIDAY_CALENDAR_FILE` 固定自己的完整日历路径，更新数据后受控重启。未知年份不猜测：创建时无下一个已覆盖日期则整体拒绝；运行中到达日历边界时，只暂停非工作日任务，普通每天/一次性任务继续。列表会显示“日历待更新”。详情、来源、更新格式和回滚步骤见 [节假日日历说明](HOLIDAY-CALENDAR.md)。
+# 3. Attach one or more local files (validated against the secret path deny list)
+codex-bot send "Daily execution report" -f /srv/reports/fills.csv
 
-非工作日任务离线恢复时不在工作日补发，也不重放过去日期的消息；当天的时间尚未到则等待，到时或当天已过时每个时间点最多补发一轮。日历暂停任务在更新日历并重启后只安排未来时间。普通文字由统一语义协议处理；不支持或信息不足时应说明或追问，不能声称 Bot 未接入 Telegram。普通讨论和 `/codex` 仍使用原会话。
-
-旧任务无需迁移；**创建非工作日任务后，提醒文件会写为版本 2，v1.4.0 及更早版本不能直接读取（即使该类任务已取消，历史仍保留）**。降级前必须保留完整新版状态，并按日历说明导出单独的旧类型兼容副本，不能直接覆盖为升级前旧状态。
-
-Discord 普通文字命令也可写成 `!remind daily 21:30 准备休息`、`!reminders` 和 `!cancelreminder 任务ID`。新增原生斜杠命令是 `/remind details:...`、`/reminders`、`/cancelreminder id:...`，使用前按本文步骤预览并重新注册。定时发送使用 Bot 私聊接口，不保存或复用短期 interaction token，不向频道发送，也不会触发用户/角色提及。Discord 需保持 `DISCORD_ALLOW_DMS=true`，并允许 Bot 发私信；关闭此配置会暂停已有定时消息。TG 用户需先在 Bot 私聊中发送 `/start`，且不能屏蔽 Bot。
-
-服务正常运行时每 5 秒检查一次，到达时间后开始发送，实际到达时间受网络及平台限制影响，不能保证精确到秒。服务离线期间不会发送。重启后一次性任务会补发待发消息；每天任务只补发一次并安排下一次未来时间，不逐日补发所有错过的轮次。Bot 忙碌时仍可使用原生提醒命令；自然语言管理需等待当前对话结束。平台发送队列或限流仍可能造成延迟。
-
-每轮发送前先保存“发送中”，再调用平台接口。网络失败或进程在发送期间退出时，结果可能无法确认；该轮标记“发送未确认”，**不自动重发**，请先检查私聊记录。每天任务仍继续未来轮次。此策略避免不确定结果导致重复，但可能漏掉一条；不是端到端“恰好发送一次”的保证。开始发送后的消息不能撤回，待本次完成后可取消每天任务的后续轮次。状态写入失败时暂停调度，修复权限并重启后再检查结果，不重复创建相同任务。
-
-定时消息保存在独立 `REMINDER_FILE`，默认与 `SESSION_FILE` 同目录，按平台及授权用户 ID 校验；状态损坏、平台或用户不符时拒绝启动，不覆盖旧文件。可选自定义路径须在私有、已忽略目录，不能与会话文件相同，也不能给两个进程共享；每个平台仍只运行一个实例。新建目录/文件使用 `0700`/`0600`。最多 50 个未结束任务（含已暂停）、500 条总记录，结束和取消记录保留；总记录满时由维护者备份后归档，不自动删除文件。
-
-**升级与验收：** 先备份两个平台实际的 `REMINDER_FILE`、原会话状态及配置。新版本无需新增必填配置，发布包也包含 `reminders.js`；版本目录部署时必须继续固定 `SESSION_FILE`，让默认定时消息文件留在稳定目录。Discord 可先执行 `node discord.js --check-config`，它会校验已有定时状态和路径权限，但不会写入或发送。按原流程确认空闲后手动重启所需平台服务，再在私聊创建未来几分钟的测试消息，检查收到一次、列表显示已发送、取消任务不再发送，并验收一次受控重启恢复。只有服务器实际收到消息才算平台验收通过。
-
-**回滚：** 先备份当前配置、会话、定时消息文件及 unit，再按部署章节恢复旧入口并受控重启。存在暂停任务时提醒文件写版本4，v1.8.0及更早程序不能读取；不要删除暂停记录或恢复旧备份来降级，应保留最新数据并先明确处理兼容性。最后一个暂停任务经操作者明确恢复或取消后，文件按实际剩余内容写回版本1/2/3。仅包含普通提醒的版本 1/2 文件可由 v1.5.0 读取并继续调度，语义理解恢复为旧版有限句式；更早版本的非工作日兼容限制见日历说明。启用模型提醒后的版本 3 文件不能由 v1.7.0 及更早程序直接读取，须按 [模型提醒说明](MODEL-REMINDERS.md) 先保留最新数据并明确处理模型任务。回滚到没有提醒功能的版本会停止定时发送，以后恢复新版时过期待发任务可能补发，需先审查旧任务。不要用较早状态覆盖升级后新增的任务或发送结果，也不要删除状态文件来处理发送失败。
-
-## 会话与错误处理
-
-首轮使用 `codex exec --json`，读取 `thread.started` 后立即保存 ID；后续使用 `codex exec resume <会话ID> --json`，不使用 `--last`。读取最后一条非 commentary 的 `agent_message`；启用调度器时通过 schema 提取普通回复或执行已校验的提醒操作，不直接展示模型 JSON，不回传工具事件和原始 stderr。
-
-状态文件保存会话 ID、模型覆盖、最近一次 token 报告、可选的最近 Bot 脱敏回执以及运行目录标识。完整历史由 Codex 保存。重启、迁移或备份时，要同时保留 Bot 状态文件和对应 `CODEX_HOME` 的会话存储，并维持相同运行账号和目录。状态文件损坏或 `WORKDIR` / `CODEX_HOME` 不匹配时拒绝启动，不会覆盖原文件。旧版不含 token 报告的状态文件兼容读取；首次写入后仍保持版本号 1，新字段是可选扩展。Windows 上原子替换遇到 `EPERM` 时最多尝试 5 次，等待总计不超过 100 毫秒；其他错误和 Debian 写入失败直接报告。
-
-升级前的消息没有 Bot 会话关联，升级后从新会话开始，不自动挑选历史会话。会话文件缺失、模型不可用或恢复失败时，保留已知关联并提示检查，不自动退回没有上下文的新对话。运行期间状态保存失败会停止当前任务，暂停该会话继续执行；修复权限后使用 `/new` 明确开始新对话。
-
-超时会先向当前 Codex 子进程发送 `SIGTERM`，5 秒后必要时发送 `SIGKILL`。超时可能发生在工具已部分执行之后，不能视为回滚；派生的工具进程也不保证已全部停止。先核实文件或操作结果，再决定是否重试。
-
-Bot 不把 Telegram Token 传给 Codex 子进程；回复会屏蔽环境配置中的凭据和常见密钥、凭据赋值及连接串格式。错误日志仅记录固定类别，不记录原始异常、提示词或 stderr。这不改变 Codex 的文件访问、MCP、网络或命令执行权限，请继续沿用并审查服务账号现有权限配置。
-
-## 本地验证
-
-```bash
-npm test
-node --check index.js
-node --check codex-runner.js
-node --check session-store.js
-node --check usage.js
-node --check quota.js
-node --check reminders.js
-node --check discord.js
-node --check discord-client.js
-git diff --check
+# 4. Pipe command output from stdin
+df -h | codex-bot send
 ```
 
-自动化测试只使用模拟 Telegram 方法和 Codex 子进程，不调用模型、不使用真实凭据、不连接 Telegram。覆盖会话恢复、重启、模型切换、默认模型、会话隔离、忙碌保护、超时、错误事件、UTF-8 分片、脱敏及状态写入失败，也覆盖 token 快照保存、未知值、额度接口握手、多窗口、登录方式、并发查询和子进程退出。测试文件保留在已忽略的 `.test-artifacts/` 下，不自动删除任何文件。
+#### 6. Security Architecture, Sandbox & Permissions
 
-Debian 实际验收需要使用已运行的 Bot：
+- **Child-Process Secret Scrubbing**: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, user allowlists, `DATA_DIR`, and `BOT_ENV_FILE` are stripped before spawning `codex`, preventing exposure via `/proc/self/environ`.
+- **Filesystem Access & Sandbox (Linux / macOS)**:
+  - **Reads**: `~/.codex/auth.json`, `~/.ssh`, `BOT_ENV_FILE`, `bot.db`, `*.env`, and `*.pem` are strictly blocked from both Codex reads and file sends.
+  - **Writes**: Read-only by default. Persistent write access requires an explicit command (`/dir add rw /srv/out`) or direct user phrasing from an allowlisted user. System paths (`/`, `/etc`, `/proc`, `/sys`, `/root`, `~/.codex`, `~/.ssh`, `DATA_DIR`) can never be granted write access.
+  - **Managed `sandbox.toml`**: `codex-bot` generates `~/.codex/sandbox.toml` (marked `# managed by codex-bot; do not edit`; never overwrites user-authored files).
+- **Shell Execution Gate (`/shell`)**: Disabled by default (`ALLOW_SHELL=false`); toggleable via `/shell on` and `/shell off`.
+- **Ephemeral Per-Turn Local MCP**: Built-in actions (reactions, file sends, pronunciation, web images) run over a localhost random-port MCP server configured in `DATA_DIR/workspace/.codex/config.toml` with a single-turn random bearer token scoped strictly to the active chat.
 
-1. 发送“记住测试代号：上下文验收甲”，随后询问代号，确认前文可被引用。
-2. 使用 `/model <账号支持的另一个模型ID>`，再问代号，确认切换后仍有上下文；核实 CLI 实际模型记录，不能只看 `/status`。
-3. 使用 `/new`，确认下一轮不再沿用前文，同时模型选择保留。
-4. 在受控重启前建立会话，重启后追问，确认状态文件和 Codex 历史都被恢复。
-5. 长任务期间连发一条消息和 `/model`，确认收到忙碌提示；通过 `/status` 查看处理状态。
-6. 对账号不支持但格式合法的模型，确认得到脱敏失败提示，改回可用模型后仍能恢复原会话。
-7. 完成一个普通任务后发送 `/usage`，确认获得 token 报告，缺失的字段显示“未知”；重启后再查询，确认报告仍保留。
-8. 在 ChatGPT 登录方式下发送 `/quota`，确认显示额度窗口及北京时间重置时间。API Key/provider 登录时应收到不支持提示，而不是剩余 0%。
+> [!IMPORTANT]
+> **Security Best Practice**: Because Codex can read files accessible to the service user and browse external web pages, prompt-injection payloads on untrusted websites could attempt to exfiltrate readable local files. **Always run `codex-bot` under a dedicated unprivileged OS user (e.g., `codex`)** that has no read access to unrelated secrets on the host.
 
-## Discord 配置与部署
+---
 
-Discord 增量在 `codex/discord` 分支开发，审查并合入远端 `master` 后才能部署生产。第一版支持一个授权用户、私聊、白名单频道/线程、文字消息和原生斜杠命令，使用单个 Gateway 连接。没有附件、语音、多人共享对话或分片功能。只需出站 HTTPS 和 WebSocket，无需新增入站端口或反向代理。
+### Upgrade, Testing & Troubleshooting
 
-Discord 默认工作目录是 `/home/codex/discord-workdir`，状态文件是 `.bot-state/discord-sessions.json`，与 Telegram 分开。可以共用服务账号及 `CODEX_HOME`，Codex 额度和账号并发限制也共用。若主动共用 `WORKDIR`，两个服务可能同时修改同一工作树；本版没有跨进程任务锁，不应同时向同一工作树发修改任务。分开工作目录不会改变 Codex 账号既有的文件访问权限。
+#### Safe Upgrade & Backup
 
-状态新增 `platform` 标识，旧状态默认归属 Telegram。Discord 键为 `discord:频道ID:0:用户ID`，线程有自己的频道 ID 和上下文。平台不匹配会拒绝读取。自定义状态路径也必须独立，不能给两个进程共享同一个文件。没有跨平台账号绑定或上下文共享。
+Always back up `bot.db` before upgrading (replacing the binary preserves all sessions, memories, and scheduled tasks):
 
-**Discord 控制台准备：** 创建专用应用和 Bot，本地保存 Token；启用 Bot 的 Message Content Intent，本版即使只用斜杠命令也请求此 intent。通过 `bot` 和 `applications.commands` scopes 邀请到服务器，按需授予 View Channel、Send Messages、Read Message History、Send Messages in Threads 权限，不需要 Administrator。私有线程需要 Bot 已加入。启用客户端 Developer Mode 后复制用户、频道和线程 ID。
+```sh
+# 1. Stop service and back up SQLite database
+sudo systemctl stop codex-tg-bot
+sudo cp -p /var/lib/codex-tg-bot/bot.db /var/lib/codex-tg-bot/bot.db.bak-$(date +%Y%m%d)
 
-`DISCORD_ALLOWED_USER_ID` 必填。`DISCORD_CHANNEL_IDS` 是逗号分隔的精确频道或线程白名单，留空禁用所有服务器频道；父频道不自动授权新线程。私聊默认开启且只接受授权用户，可用 `DISCORD_ALLOW_DMS=false` 关闭。其他用户的文字消息静默忽略，斜杠命令返回未授权提示。
-
-在 myServer 上，以实际服务账号进入项目目录。以下示例按已有 `/home/codex/codex-tg-bot` 路径编写，执行前核对服务账号、目录和 Node 二进制：
-
-```bash
-cd /home/codex/codex-tg-bot
-git branch --show-current
-git status --short
-systemctl show codex-tg-bot.service --property=User,WorkingDirectory
-node --version
-npm ls node-telegram-bot-api dotenv --depth=0
+# 2. Upgrade via helper script (requires authenticated gh CLI) or replace binary manually
+sudo sh deploy/upgrade.sh
 ```
 
-先按本文“部署与回滚”备份，再拉取已审查的 `master`。若缺少依赖，先备份现有 `node_modules` 和依赖文件，确认接受恢复后手动执行 `npm ci --omit=dev`；该命令会重建 `node_modules`，按锁文件恢复已有依赖，不升级依赖或修改锁文件。安装失败则停止部署。
+> To roll back, restore the previous `codex-bot` binary and restart the service.
 
-首次配置确认 `.env.discord` 尚不存在；已存在时先备份，在原文件上修改。下面的复制不覆盖已有文件：
+#### Offline Regression Tests
 
-```bash
-umask 077
-cp -an .env.discord.example .env.discord
-mkdir -p /home/codex/discord-workdir
+When the Go module cache is already populated locally, run the full test suite offline:
+
+```sh
+GOTOOLCHAIN=local GOPROXY=off go test -mod=readonly ./...
 ```
 
-在本地编辑 `.env.discord`，填写 Token、用户 ID、频道白名单。真实配置、状态和注册备份已被忽略，不能上传聊天或 Git。`CODEX_*` 字段同 Telegram，Discord 超时上限为 600000 毫秒。默认只读入口旁的 `.env.discord`，不自动读 `.env`；`DISCORD_ENV_FILE` 可指定其他私有配置。
+#### Troubleshooting
 
-```bash
-node --check discord.js
-node --check discord-client.js
-npm test
-node discord.js --check-config
-```
-
-`--check-config` 只读检查配置、已有状态、工作目录、状态目录及绝对 CLI 路径的本地权限，不创建状态，不连接 Discord；不能证明网络和 Codex 登录可用。仍须以实际账号和 `CODEX_HOME` 完成本文章前面的 Codex 检查。systemd 的 Node 版本以 `ExecStart` 中的二进制为准。
-
-**使用：** 普通文字继续当前对话；也支持 `!codex 任务`、`!model 模型ID`、`!model default`、`!new`、`!models`、`!status`、`!usage`、`!quota`、`!id`、`!help`。这些文字命令无需注册。原生斜杠命令使用 `/codex task:...` 和 `/model name:...`，其余命令同名。
-
-服务启动不自动注册斜杠命令。需要注册时填写 `DISCORD_APPLICATION_ID`；可先填 `DISCORD_COMMAND_GUILD_ID` 在一个服务器验收，留空则注册全局命令。服务器命令不出现在私聊，私聊仍可用文字命令；全局命令在私聊的可见性也取决于应用安装及共同服务器。改变注册作用域不会自动删除原作用域的命令。
-
-```bash
-# 无需凭据、无网络请求，仅输出准备注册的定义。
-node discord.js --register-commands
-# 核对应用、作用域及命令后，手动确认执行：
-node discord.js --register-commands --apply
-```
-
-`--apply` 更新所选作用域内十二个同名命令，其他命令保留。更新前读取现有定义，写入 `.local-backups/discord-commands-*.json` 私有备份，备份失败不更新。中途失败可能只更新了一部分，检查原因后可以重新执行。不自动删除任何命令。
-
-斜杠命令先发送延迟确认，确认失败不执行任务；回复只对发起人可见。普通文字回复对所在频道可见。长回复自动分段，关闭用户、角色和 everyone 提及。交互有有效期，即使任务成功，极慢网络下回复仍可能失败，不得因此自动重跑任务。
-
-前台验收可运行 `npm run start:discord`，前提是 Discord 服务尚未运行；看到 `Discord gateway ready.` 只证明 Gateway 已连接。验收完退出前台进程，再交给 systemd，不能运行两个 Discord 实例。
-
-**独立服务：** 示例为 `deploy/codex-discord-bot.service.example`。先核对其中的账号、组、Node、项目和配置路径。首次安装先确认没有旧 unit；若已存在，先备份实际 unit 并审查差异，不能直接覆盖：
-
-```bash
-systemctl show codex-discord-bot.service --property=LoadState,FragmentPath,User,WorkingDirectory
-```
-
-首次部署 `LoadState=not-found` 是正常情况。核对示例且确认目标不存在后，由操作者执行：
-
-```bash
-sudo install -m 0644 deploy/codex-discord-bot.service.example /etc/systemd/system/codex-discord-bot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now codex-discord-bot.service
-systemctl is-active codex-discord-bot.service
-journalctl -u codex-discord-bot.service -n 30 --no-pager
-```
-
-已有 Discord 服务更新时，确认空闲，备份源码、配置、独立状态及 unit，再更新审查后的文件。需要更新 unit 时执行 `daemon-reload`，确认会短暂离线并中断运行任务后，手动执行 `sudo systemctl restart codex-discord-bot.service`。示例用 `KillMode=control-group`，停止时会终止服务的 Codex 子进程。Telegram 服务配置不变；共享核心升级后的 Telegram 回归验收仍按其部署步骤进行。
-
-验收私聊、白名单频道及线程的连续对话、模型切换、`new`、用量、额度和帮助；确认其他用户、Bot/webhook、未授权频道不执行任务，长任务期间拒绝新任务但允许状态查询，受控重启后上下文恢复。线程须单独列入白名单。本地测试使用模拟 REST/Gateway/Codex；真实账号、网络、意图和平台权限必须在 Debian 实际验收。
-
-固定错误：`dependency_missing` 检查已有 Node 依赖；HTTP 401 检查凭据，403 检查权限；`close_4014` 检查 Message Content Intent；`node_websocket_required` 检查 Node 和启动参数。断线和无心跳 ACK 会恢复连接；连续十次恢复失败、认证/意图不允许或会话启动额度不足时停止，交由 systemd 的有限重启策略处理。不记录原始错误、Token 或 Gateway session 信息。
-
-**READY 握手启动故障：** 初始 Discord 版的地址校验过严，会拒绝 `gateway-us-east1-b.discord.gg` 这类区域恢复地址，记录 `ready_protocol` 并退出。修复版支持 Discord 区域 Gateway，同时继续拒绝外部域名、明文 WebSocket、带凭据或非默认端口的地址。READY 缺少有效会话 ID 时记录 `ready_session_id`，恢复地址无效时记录 `ready_gateway_url`，不输出握手原文或会话凭据。[官方 Gateway 说明](https://docs.discord.com/developers/events/gateway)要求断线恢复使用 READY 返回的 `resume_gateway_url`。
-
-该修复只涉及 Discord 客户端逻辑，不改变依赖、配置或状态格式，无需重置 Bot Token 或重新注册命令。在 myServer 的实际服务账号下，确认目录和分支正确、工作区干净，再备份旧客户端；任何检查、备份、拉取或测试失败，都不要重启：
-
-```bash
-cd /home/codex/codex-tg-bot
-git branch --show-current
-git status --short
-# 确认当前为 master 且没有未提交修改后继续。
-umask 077
-READY_BACKUP_DIR="$PWD/.local-backups/$(date +%Y%m%d-%H%M%S)-discord-ready"
-mkdir -p "$READY_BACKUP_DIR"
-cp -a -- discord-client.js "$READY_BACKUP_DIR/discord-client.js"
-git rev-parse HEAD > "$READY_BACKUP_DIR/revision.txt"
-git pull --ff-only origin master
-node --check discord-client.js
-npm test
-node discord.js --check-config
-```
-
-确认新代码已经包含区域 Gateway 修复，再手动执行下面的重启。重启会短暂中断 Discord 连接并终止其正在执行的任务，只影响 Discord 服务；Telegram 无需重启：
-
-```bash
-sudo systemctl restart codex-discord-bot.service
-systemctl is-active codex-discord-bot.service
-journalctl -u codex-discord-bot.service --since "5 minutes ago" --no-pager
-```
-
-验收新日志中出现 `Discord gateway ready.`，服务不再反复退出，再发送 `!status`、`!help` 和普通文字确认实际回复。若仍然失败，检查修复版的固定错误类别；不要发送 Token、READY 原文或 Gateway 会话 ID。回滚时先备份当前客户端，确认原 `READY_BACKUP_DIR` 和 `revision.txt` 属于此次更新，再由操作者手动用 `cp -a -- "$READY_BACKUP_DIR/discord-client.js" discord-client.js` 恢复，语法检查通过后受控重启。该回滚只恢复源码，Git HEAD 不变，工作区会出现已知修改，原地址校验故障也会恢复；配置、状态及 Codex 历史不覆盖。
-
-回滚新增服务会中断 Discord 任务并离线。确认空闲、备份当前源码/配置/状态后，由操作者执行 `sudo systemctl disable --now codex-discord-bot.service`，只影响 Discord。unit、配置及状态可以保留，不需要删除。回滚已有 Discord 部署时成套恢复源码和 unit，检查后 `daemon-reload` 并受控重启；不能换入 Telegram 状态。斜杠命令独立于源码，停服务不删除命令，旧定义需按私有备份逐项审查恢复。
-
-## 部署与回滚
-
-TG 和 Discord 一次升级到 v1.6.0 可使用独立脚本 [deploy/upgrade-v1.6.0.sh](deploy/upgrade-v1.6.0.sh)，提供本地检查、模型预检、备份、双服务切换和回滚。用法、默认路径及执行边界见 [脚本说明](deploy/UPGRADE-SCRIPT.md)。
-
-### GitHub 发布包部署（服务器无需 Git 或 npm）
-
-从 [GitHub Releases](https://github.com/rshun/codex-bot/releases) 下载对应版本的 `codex-bot-v版本-node.tar.gz` 和 `SHA256SUMS`。不要使用 GitHub 自动生成的 Source code 压缩包，它不包含运行依赖。发布包同时提供 Telegram、Discord、锁定的现有依赖、许可证、示例配置、服务示例和逐文件哈希清单 `release-manifest.json`。运行文件仍为 JavaScript；服务器需要 Node.js 22.4 或以上和已经安装、登录的 Codex CLI，部署时无需拉取仓库、构建或执行 npm 安装。
-
-包不包含真实 `.env`、`.env.discord`、会话状态、Codex 认证/历史、测试、Git 元数据或本地备份。首次安装在稳定配置目录中创建配置；已有安装继续使用原配置和状态。以下按已有 `/home/codex/codex-tg-bot` 目录及 `codex` 账号编写，实际服务账号、Node 路径、自定义配置/状态和 unit 位置必须先核对。
-
-**下载与校验：** 使用现有 `curl`、`tar` 和 `sha256sum`，没有这些工具时先停下核对环境，不自动安装。以下每一步成功后才继续；下载到新建目录，不覆盖已有包：
-
-```bash
-node --version
-command -v curl tar sha256sum
-BOT_DIR=/home/codex/codex-tg-bot
-VERSION=1.1.0
-PACKAGE_DIR="$BOT_DIR/.local-backups/package-v$VERSION-$(date +%Y%m%d-%H%M%S)"
-umask 077
-mkdir -p "$PACKAGE_DIR"
-cd "$PACKAGE_DIR"
-curl -fL -o "codex-bot-v$VERSION-node.tar.gz" "https://github.com/rshun/codex-bot/releases/download/v$VERSION/codex-bot-v$VERSION-node.tar.gz"
-curl -fL -o SHA256SUMS "https://github.com/rshun/codex-bot/releases/download/v$VERSION/SHA256SUMS"
-sha256sum --check SHA256SUMS
-tar -tzf "codex-bot-v$VERSION-node.tar.gz"
-```
-
-**安装独立版本目录：** 确认校验通过、压缩包根目录是 `codex-bot-v$VERSION`。以服务账号执行，确认目标版本目录尚不存在；已存在时先检查原内容，不在原目录再次解压：
-
-```bash
-RELEASE_DIR="$BOT_DIR/releases/codex-bot-v$VERSION"
-test ! -e "$RELEASE_DIR"
-mkdir -p "$BOT_DIR/releases"
-tar -xzf "$PACKAGE_DIR/codex-bot-v$VERSION-node.tar.gz" -C "$BOT_DIR/releases"
-node --check "$RELEASE_DIR/index.js"
-node --check "$RELEASE_DIR/discord.js"
-node --check "$RELEASE_DIR/discord-client.js"
-```
-
-包没有测试目录，不要把在包内执行 `npm test` 当作完整验收。发布前在源码仓库运行全量测试和解压冒烟检查；服务器继续按本文 Telegram/Discord 实际验收流程验证网络、权限、CLI 登录、模型及上下文。
-
-**保留配置与上下文：** `WorkingDirectory` 继续为稳定目录 `$BOT_DIR`，Telegram 从这里加载原 `.env`；Discord 的 `DISCORD_ENV_FILE` 指向原 `.env.discord`。两个服务都必须明确指定原来的 `SESSION_FILE`，不要使用新版本目录下的默认值，否则旧关联不会被读取。下面默认路径仅供核对，自定义路径时必须替换成现有实际值。保持原 `WORKDIR`、`CODEX_HOME` 和服务账号不变：
-
-```bash
-cd "$BOT_DIR"
-DISCORD_ENV_FILE="$BOT_DIR/.env.discord" SESSION_FILE="$BOT_DIR/.bot-state/discord-sessions.json" node "$RELEASE_DIR/discord.js" --check-config
-systemctl show codex-tg-bot.service --property=User,WorkingDirectory,FragmentPath
-systemctl show codex-discord-bot.service --property=User,WorkingDirectory,FragmentPath
-```
-
-首次配置从包内 `.env.example`、`.env.discord.example` 复制到 `$BOT_DIR`，仅在目标不存在时复制；真实值在本地填写。`WORKDIR` 仍须事先存在。已有配置不要覆盖。包内的 `deploy/codex-tg-bot.service.example` 和 `deploy/codex-discord-bot.service.example` 已填写本版本入口，但账号、配置、状态路径和现有沙箱限制仍须逐项审查。
-
-**切换现有服务：** 先确认 Bot 空闲，按本文备份要求将真实配置、实际状态、`CODEX_HOME` 和现有 unit 保存到受保护目录；确认备份可用。首次迁移时原源码目录和依赖可以保留。不要用示例整体覆盖已有 unit，只在备份后的实际 unit 中调整以下字段，保留原账号、代理环境及沙箱设置：
-
-| 服务 | 需要核对的字段（示例路径） |
-| --- | --- |
-| Telegram | `WorkingDirectory=/home/codex/codex-tg-bot`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.5.0/index.js`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/sessions.json` |
-| Discord | 相同 `WorkingDirectory`；`ExecStart=/usr/bin/node /home/codex/codex-tg-bot/releases/codex-bot-v1.5.0/discord.js`；`Environment=DISCORD_ENV_FILE=/home/codex/codex-tg-bot/.env.discord`；`Environment=SESSION_FILE=/home/codex/codex-tg-bot/.bot-state/discord-sessions.json` |
-
-systemd 中的 `Environment=SESSION_FILE` 优先于 dotenv 文件；若原配置使用自定义状态路径，必须将 unit 中的值也改为该路径。只迁移 Discord 时不修改 Telegram unit。首次安装 unit 时，确认目标不存在并核对包内对应示例后，再由操作者安装。
-
-修改 unit 后确认会短暂中断所选平台连接并终止运行任务，再手动执行。以下只重启 Discord；迁移 Telegram 时使用它的实际服务名，分别验收：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart codex-discord-bot.service
-systemctl is-active codex-discord-bot.service
-journalctl -u codex-discord-bot.service -n 30 --no-pager
-```
-
-后续升级下载新版本、校验、解压到新目录，备份 unit 后仅切换入口路径，保持配置/状态路径稳定。**回滚**会中断所选服务的任务：先备份当前 unit，确认原备份及旧版本目录完整，再由操作者恢复原 unit 或改回旧版本 `ExecStart`，检查后 `daemon-reload` 并受控重启，按原平台验收。不要恢复旧状态覆盖升级期间产生的会话。新旧版本目录及备份均可保留，不自动删除。
-
-### 维护者打包与发布
-
-在已同步的开发分支修改并运行 `npm test`；全量测试还需要现有 Git 和系统 `tar`。审查合并到 `master` 后，以干净工作区运行 `npm run build:release`。构建仅读取项目既有、锁定的已安装依赖，不联网、不自动安装、不修改依赖和锁文件。依赖缺失或版本不符时拒绝构建，恢复安装必须先由操作者确认。只支持当前纯 JavaScript 依赖组合，未来新增依赖需要重新审查打包逻辑。
-
-构建生成 `dist/codex-bot-v版本-node.tar.gz`、`dist/SHA256SUMS`，保留临时目录，重复构建遇到已有输出会拒绝覆盖。开发验证可用 `npm run build:release -- --allow-dirty --output .test-artifacts/your-new-build`，脏工作区产物带 `-dev`，不能发布成正式版本。发布前检查包清单、敏感信息、依赖许可证和解压运行结果，再为经过验证的 `master` 提交创建 `v版本` 标签，并上传两个文件到对应 GitHub Release。现阶段由维护者生成并上传包，没有自动安装依赖的 CI 流程。
-
-已有旧版本产物时，使用新输出目录，例如 `npm run build:release -- --output dist/v1.5.0`，不要覆盖旧包或校验文件。
-
-### Git 仓库部署方式
-
-本地开发必须在开发分支进行，修改前拉取对应远端。查询功能发布在 `codex/tg-context-model` 分支。**推送开发分支不会自动更新远端 `master` 或 Debian。** 先在 GitHub 审查该分支到 `master` 的 Pull Request 并合并，再按以下步骤更新生产机器；不要在 Debian 的 `master` 工作区直接开发。本项目不会自动部署、安装依赖或重启服务。
-
-以下命令仅供操作者核实后手动执行。升级期间保持 Bot 空闲并停止发送任务；重启会短暂中断 Telegram 回复，正在执行的任务可能被中断。本次查询功能没有修改依赖、锁文件或配置字段，无需重新安装依赖。若从首版升级，还必须补充 `ALLOWED_USER_ID` 并检查状态目录权限。
-
-先记录 Debian 机器、Bot 实际目录、服务名称和运行账号；这些不能仅从本地默认路径推断。在 Debian 上可设置以下占位值，并只读检查：
-
-```bash
-BOT_DIR=/path/to/codex-tg-bot
-BOT_UNIT=your-bot.service
-cd "$BOT_DIR"
-git branch --show-current
-git status --short
-systemctl show "$BOT_UNIT" --property=User,WorkingDirectory,FragmentPath
-git fetch origin
-git log -3 --oneline origin/master
-```
-
-将 `BOT_DIR` 替换为真实的绝对项目路径，`BOT_UNIT` 替换为实际 systemd 服务名。确认当前分支是 `master`，`git status --short` 没有输出，运行账号和 `WorkingDirectory` 与预期一致，且 `origin/master` 已包含查询功能。如果有未提交改动或仍然只有首版提交，先停止升级。不要输出 `.env` 或 Codex 认证文件内容。
-
-在 systemd 的实际运行账号及相同 `CODEX_HOME` 下，执行本文“运行前检查”中的 CLI 命令，确认 `exec/resume --json` 和 `app-server` 可用。不同账号的登录状态不能作为 Bot 账号的证明；`app-server --help` 也不能代替升级后的 `/quota` 实际验收。
-
-备份使用私有目录，包含旧版运行文件、真实配置和会话状态；先确认磁盘空间和文件权限。下面默认配置文件为项目目录 `.env`，Bot 状态为 `.bot-state/sessions.json`。**自定义了路径时，先修改变量，再执行备份。** 从新版升级还应备份实际 `CODEX_HOME`，其中含有认证凭据，只能保存在受保护目录。
-
-```bash
-BOT_ENV="$BOT_DIR/.env"
-BOT_STATE="$BOT_DIR/.bot-state/sessions.json"
-CODEX_HOME_DIR=/path/to/actual/codex-home
-BACKUP_DIR="$BOT_DIR/.local-backups/$(date +%Y%m%d-%H%M%S)"
-umask 077
-mkdir -p "$BACKUP_DIR/source"
-for file in index.js package.json package-lock.json .gitignore codex-runner.js session-store.js usage.js quota.js reminders.js discord.js discord-client.js; do
-  if [ -f "$file" ]; then
-    cp -a -- "$file" "$BACKUP_DIR/source/"
-  fi
-done
-git rev-parse HEAD > "$BACKUP_DIR/revision.txt"
-if [ -f "$BOT_ENV" ]; then
-  cp -a -- "$BOT_ENV" "$BACKUP_DIR/bot.env"
-fi
-if [ -f "$BOT_STATE" ]; then
-  cp -a -- "$BOT_STATE" "$BACKUP_DIR/bot-session-state.json"
-fi
-cp -a -- "$CODEX_HOME_DIR" "$BACKUP_DIR/codex-home"
-```
-
-逐项确认备份成功，再更新代码。如果 `CODEX_HOME_DIR` 不存在、备份失败或空间不足，停止升级并检查实际目录，不要跳过备份。从首版升级时没有 Bot 状态文件是正常情况。备份不能上传仓库或聊天。
-
-```bash
-git pull --ff-only origin master
-git log -1 --oneline
-node --check index.js
-node --check codex-runner.js
-node --check session-store.js
-node --check usage.js
-node --check quota.js
-npm test
-```
-
-拉取、语法检查或测试任一步失败，都不要重启。测试仅使用模拟子进程，不调用真实模型，也不连接 Telegram。不要覆盖已有 `.env`；从首版升级时，在已备份配置上只补充必填用户 ID 和所需可选设置。确认全部运行文件已更新，特别是新增的 `usage.js` 和 `quota.js`。
-
-**重启影响：** 正在进行的 Bot 任务可能中断，Telegram 短暂无法响应。先用 `/status` 确认没有运行中的任务，核实新配置和状态目录权限，再由操作者执行：
-
-```bash
-sudo systemctl restart "$BOT_UNIT"
-systemctl is-active "$BOT_UNIT"
-journalctl -u "$BOT_UNIT" -n 50 --no-pager
-```
-
-日志仅应包含固定错误类别。提交工单或聊天前，仍需检查并脱敏服务历史日志。随后发送 `/help`、`/status`，完成一次任务并查询 `/usage`，再查询 `/quota`；最后完成上面的上下文、模型及重启恢复验收。若 CLI 或登录方式不支持额度接口，Bot 应返回明确提示，不能以此认定查询已在生产验证成功。
-
-如需回滚，先确认 Bot 空闲，重新备份当前运行文件和状态，避免丢失升级后产生的会话。核实原备份目录的 `revision.txt` 和 `source/` 确实属于此次升级，再由操作者恢复旧版运行文件；该操作覆盖代码，重启影响与升级相同：
-
-```bash
-# 新终端执行时，重新设置真实的 BOT_DIR、BOT_UNIT 和原 BACKUP_DIR。
-cat "$BACKUP_DIR/revision.txt"
-ls "$BACKUP_DIR/source"
-cp -a -- "$BACKUP_DIR/source/." "$BOT_DIR/"
-node --check "$BOT_DIR/index.js"
-sudo systemctl restart "$BOT_UNIT"
-systemctl is-active "$BOT_UNIT"
-journalctl -u "$BOT_UNIT" -n 50 --no-pager
-```
-
-不自动恢复 `.env`、Bot 状态或 Codex 历史；只有确认必须恢复且当前文件已另行备份时，才逐项处理。上下文/模型版会忽略新增 token 字段，后续保存可能清除报告，但会话 ID 和模型仍可使用。首版会失去上下文和模型命令。新增模块可以保留，不需要删除。
-
-这种恢复只回滚运行文件，不改变 Git 分支或 HEAD，因此 `git status` 会显示恢复后的本地修改。下次升级前必须先处理这些已知回滚改动，不能在脏工作区直接拉取。不要使用 `git reset --hard`、`git clean` 或强制推送，也不要用早期状态备份覆盖升级期间新产生的会话。
-
-## Debian 可执行程序
-
-支持把 Node 运行时、TG/Discord 代码和依赖打包为一个可执行文件，分别运行 `codex-bot telegram` 与 `codex-bot discord`。配置、会话和提醒继续保存在程序外，Codex CLI 保持独立。构建、原路径迁移、只读预检、systemd 和回滚说明见 [可执行程序部署](deploy/EXECUTABLE.md)。
-
-v1.7.0 的 TG、Discord 双服务完整升级命令见 [Debian v1.7.0 升级文档](UPGRADE-v1.7.0.md)。
-
-v1.9.0新增暂停/恢复及完整状态列表，双服务升级、ExecStart核对与回滚命令见 [Debian v1.9.0 升级文档](UPGRADE-v1.9.0.md)，Release附带 `upgrade-v1.9.0.sh`。
-
-v1.8.0 增加 TG 触发时调用模型的可选提醒。双服务备份、预检、升级与回滚命令见 [Debian v1.8.0 升级文档](UPGRADE-v1.8.0.md)，Release 同时提供已校验的 `upgrade-v1.8.0.sh`。
-
-## Git 与敏感信息
-
-提交源码、依赖声明、锁文件、测试、README 和 `.env.example`；忽略 `node_modules/`、真实 `.env`、`.bot-state/`、测试产物、备份和日志。自定义状态文件不要放进已跟踪路径。
-
-提交前检查 `git diff --cached`、未跟踪的新文件和敏感关键词。禁止提交 Telegram Token、Codex 认证文件、API Key、密码或真实环境配置。示例文件只能保留占位符。
-
-## 官方参考
-
-- [Codex 非交互模式、JSONL 事件与会话恢复](https://learn.chatgpt.com/docs/non-interactive-mode)
-- [Codex CLI 命令与模型参数](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
-- [Codex App Server 账号及额度接口](https://learn.chatgpt.com/docs/app-server)
-- [Discord Gateway 与意图](https://docs.discord.com/developers/events/gateway)
-- [Discord 命令注册](https://docs.discord.com/developers/interactions/application-commands)
-- [Discord 交互确认和有效期](https://docs.discord.com/developers/interactions/receiving-and-responding)
-- [Node 内置 WebSocket](https://nodejs.org/api/globals.html#class-websocket)
+- **`unknown model` error**: Indicates the model previously selected for that chat is not available in your `codex` CLI version or account. Run `/model` in that chat to view candidate models and switch via `/model <name>` (**do not run `/reset` first**, as switching models preserves your conversation context).
+- **Inspecting Logs**: Check `codex --version` and `sudo journalctl -u codex-tg-bot -n 60 --no-pager` in read-only mode. Always redact tokens, session IDs, and user IDs before sharing logs.
