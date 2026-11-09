@@ -1,4 +1,4 @@
-﻿# Installed dependencies
+# Installed dependencies
 node_modules/
 
 # Local environment configuration
@@ -32,3 +32,11 @@ dist/
 
 # Isolated executable build tools and downloaded Node runtimes
 .local-build-tools/
+
+# Go binaries and runtime data
+/codex-bot
+/codex-bot-*
+/codex-tg-bot
+*.exe
+/data/
+.agent_context.md
