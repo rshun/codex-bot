@@ -180,6 +180,80 @@ func TestPromptContainsNowAndZone(t *testing.T) {
 	}
 }
 
+func TestSchemaStrictCompliance(t *testing.T) {
+	var root struct {
+		Type                 string                     `json:"type"`
+		AdditionalProperties *bool                      `json:"additionalProperties"`
+		Required             []string                   `json:"required"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(Schema), &root); err != nil {
+		t.Fatalf("unmarshal Schema: %v", err)
+	}
+	if root.Type != "object" {
+		t.Fatalf("want type=object, got %q", root.Type)
+	}
+	if root.AdditionalProperties == nil || *root.AdditionalProperties != false {
+		t.Fatal("OpenAI strict mode requires additionalProperties: false on root object")
+	}
+	reqSet := make(map[string]bool, len(root.Required))
+	for _, k := range root.Required {
+		reqSet[k] = true
+	}
+	for prop := range root.Properties {
+		if !reqSet[prop] {
+			t.Errorf("property %q must be listed in required for OpenAI strict mode", prop)
+		}
+	}
+	if len(root.Required) != len(root.Properties) {
+		t.Errorf("required count (%d) != properties count (%d)", len(root.Required), len(root.Properties))
+	}
+}
+
+func TestMultiTimesDailyAndCrontab(t *testing.T) {
+	raw := json.RawMessage(`{"action":"create","task_id":0,"kind":"daily","at":"","time":"06:01","times":["06:01","11:02","16:03"],"weekdays":[],"month_days":[],"every_minutes":0,"date_file":"","cron":"","prompt":"发送测试消息","summary":"每天 06:01/11:02/16:03：发送测试消息","error":""}`)
+	parsed, err := Decode(raw, "")
+	if err != nil {
+		t.Fatalf("Decode multi-time: %v", err)
+	}
+	if err := parsed.Validate(at(19, 5, 0, 0), loc, time.Hour); err != nil {
+		t.Fatalf("Validate multi-time: %v", err)
+	}
+	n1, ok := parsed.Next(at(19, 5, 0, 0), loc)
+	if !ok || !n1.Equal(at(19, 6, 1, 0)) {
+		t.Fatalf("first run got %v %v, want 06:01", n1, ok)
+	}
+	n2, ok := parsed.Next(n1, loc)
+	if !ok || !n2.Equal(at(19, 11, 2, 0)) {
+		t.Fatalf("second run got %v %v, want 11:02", n2, ok)
+	}
+	n3, ok := parsed.Next(n2, loc)
+	if !ok || !n3.Equal(at(19, 16, 3, 0)) {
+		t.Fatalf("third run got %v %v, want 16:03", n3, ok)
+	}
+	n4, ok := parsed.Next(n3, loc)
+	if !ok || !n4.Equal(at(20, 6, 1, 0)) {
+		t.Fatalf("next day run got %v %v, want next day 06:01", n4, ok)
+	}
+
+	specBytes, _ := json.Marshal(parsed.Spec)
+	merged := MergeCrontab("", []CronEntry{{
+		ID:      1,
+		Spec:    string(specBytes),
+		Summary: parsed.Summary,
+		NextRun: n1,
+	}}, loc, "/usr/local/bin/codex-bot")
+	for _, want := range []string{
+		"1 6 * * * /usr/local/bin/codex-bot run-task 1",
+		"2 11 * * * /usr/local/bin/codex-bot run-task 1",
+		"3 16 * * * /usr/local/bin/codex-bot run-task 1",
+	} {
+		if !strings.Contains(merged, want) {
+			t.Fatalf("missing %q in crontab:\n%s", want, merged)
+		}
+	}
+}
+
 func TestCronExprAndMergeCrontab(t *testing.T) {
 	entries := []CronEntry{
 		{

@@ -240,15 +240,17 @@ func buildWinTriggersXML(s Spec, nextRun time.Time, loc *time.Location) (string,
 		return b.String(), nil
 
 	case "daily", "dates":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return "", err
 		}
-		writeWinDailyTrigger(&b, winCalendarAnchor(hr, min, loc))
+		for _, hm := range clocks {
+			writeWinDailyTrigger(&b, winCalendarAnchor(hm[0], hm[1], loc))
+		}
 		return b.String(), nil
 
 	case "weekly":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return "", err
 		}
@@ -256,11 +258,13 @@ func buildWinTriggersXML(s Spec, nextRun time.Time, loc *time.Location) (string,
 		if len(days) == 0 {
 			return "", errors.New("no weekdays")
 		}
-		writeWinWeeklyTrigger(&b, winCalendarAnchor(hr, min, loc), days)
+		for _, hm := range clocks {
+			writeWinWeeklyTrigger(&b, winCalendarAnchor(hm[0], hm[1], loc), days)
+		}
 		return b.String(), nil
 
 	case "monthly":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return "", err
 		}
@@ -282,7 +286,9 @@ func buildWinTriggersXML(s Spec, nextRun time.Time, loc *time.Location) (string,
 		if len(doms) == 0 && !hasLast {
 			return "", errors.New("invalid month_days")
 		}
-		writeWinMonthlyTrigger(&b, winCalendarAnchor(hr, min, loc), doms, hasLast, nil)
+		for _, hm := range clocks {
+			writeWinMonthlyTrigger(&b, winCalendarAnchor(hm[0], hm[1], loc), doms, hasLast, nil)
+		}
 		return b.String(), nil
 
 	case "interval":
