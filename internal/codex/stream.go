@@ -42,6 +42,7 @@ func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
 		}
+		ev.decodeMessage()
 		if ev.SessionID != "" {
 			res.SessionID = ev.SessionID
 		}
@@ -162,6 +163,9 @@ func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error) {
 
 		case "error":
 			msg := extractErrorMessage(ev.Error, ev.Message, ev.Result, "")
+			if isTransientStreamNotice(msg) {
+				continue
+			}
 			return HeadlessResult{}, &RunError{
 				Message:     msg,
 				SessionID:   res.SessionID,
@@ -206,7 +210,8 @@ type streamEvent struct {
 	Type             string             `json:"type"`
 	SessionID        string             `json:"session_id"`
 	ThreadID         string             `json:"thread_id"`
-	MessageBody      *streamMsg         `json:"message"`
+	RawMessage       json.RawMessage    `json:"message"`
+	MessageBody      *streamMsg         `json:"-"`
 	Item             *codexItem         `json:"item"`
 	Usage            *store.UsageTokens `json:"usage"`
 	Result           *string            `json:"result"`
@@ -214,7 +219,27 @@ type streamEvent struct {
 	StopReason       string             `json:"stop_reason"`
 	StructuredOutput json.RawMessage    `json:"structured_output"`
 	Error            any                `json:"error"`
-	Message          string             `json:"message"`
+	Message          string             `json:"-"`
+}
+
+func (e *streamEvent) decodeMessage() {
+	if len(e.RawMessage) == 0 {
+		return
+	}
+	var s string
+	if err := json.Unmarshal(e.RawMessage, &s); err == nil {
+		e.Message = s
+		return
+	}
+	var msg streamMsg
+	if err := json.Unmarshal(e.RawMessage, &msg); err == nil {
+		e.MessageBody = &msg
+	}
+}
+
+func isTransientStreamNotice(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	return strings.HasPrefix(lower, "reconnecting") || strings.Contains(lower, "retrying")
 }
 
 type codexItem struct {

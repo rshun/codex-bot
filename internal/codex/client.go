@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -165,6 +166,12 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 		}
 	}
 	if streamErr != nil {
+		var re *RunError
+		if errors.As(streamErr, &re) && (re.Message == "" || re.Message == "Codex CLI reported an unknown error.") {
+			if s := summarizeStderr(stderr.String()); s != "" {
+				re.Message = s
+			}
+		}
 		return HeadlessResult{}, streamErr
 	}
 	if waitErr != nil && strings.TrimSpace(res.Text) == "" && len(res.Structured) == 0 {
@@ -234,21 +241,32 @@ func (c *Client) buildArgs(opts ReplyOptions) ([]string, func(), error) {
 
 		args = append(args,
 			"--output-schema", schemaPath,
-			"--sandbox", "read-only",
-			"--ephemeral",
+			"-c", `sandbox_mode="read-only"`,
 			"-c", `web_search="disabled"`,
 			"--disable", "shell_tool",
 		)
+		if !resuming {
+			args = append(args, "--ephemeral")
+		}
 	} else {
-		if len(opts.WriteDirs) > 0 {
-			args = append(args, "--sandbox", "workspace-write")
-			for _, d := range opts.WriteDirs {
-				if d != "" {
+		var cleanDirs []string
+		for _, d := range opts.WriteDirs {
+			if strings.TrimSpace(d) != "" {
+				cleanDirs = append(cleanDirs, strings.TrimSpace(d))
+			}
+		}
+		if len(cleanDirs) > 0 {
+			args = append(args, "-c", `sandbox_mode="workspace-write"`)
+			if resuming {
+				b, _ := json.Marshal(cleanDirs)
+				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(b))
+			} else {
+				for _, d := range cleanDirs {
 					args = append(args, "--add-dir", d)
 				}
 			}
 		} else {
-			args = append(args, "--sandbox", "read-only")
+			args = append(args, "-c", `sandbox_mode="read-only"`)
 		}
 		if !opts.ShellTools {
 			args = append(args, "--disable", "shell_tool")
