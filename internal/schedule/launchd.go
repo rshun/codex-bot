@@ -287,13 +287,18 @@ func launchdSchedule(s Spec, loc *time.Location) (slots []CalendarSlot, interval
 		mon, day, hr, min := int(at.Month()), at.Day(), at.Hour(), at.Minute()
 		return []CalendarSlot{{Month: &mon, Day: &day, Hour: &hr, Minute: &min}}, 0, nil
 	case "daily", "dates":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return nil, 0, err
 		}
-		return []CalendarSlot{{Hour: &hr, Minute: &min}}, 0, nil
+		out := make([]CalendarSlot, len(clocks))
+		for i, hm := range clocks {
+			h, m := hm[0], hm[1]
+			out[i] = CalendarSlot{Hour: &h, Minute: &m}
+		}
+		return out, 0, nil
 	case "weekly":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return nil, 0, err
 		}
@@ -301,14 +306,16 @@ func launchdSchedule(s Spec, loc *time.Location) (slots []CalendarSlot, interval
 		if len(days) == 0 {
 			return nil, 0, errors.New("no weekdays")
 		}
-		out := make([]CalendarSlot, len(days))
-		for i, wd := range days {
-			w, h, m := wd, hr, min
-			out[i] = CalendarSlot{Weekday: &w, Hour: &h, Minute: &m}
+		out := make([]CalendarSlot, 0, len(days)*len(clocks))
+		for _, wd := range days {
+			for _, hm := range clocks {
+				w, h, m := wd, hm[0], hm[1]
+				out = append(out, CalendarSlot{Weekday: &w, Hour: &h, Minute: &m})
+			}
 		}
 		return out, 0, nil
 	case "monthly":
-		hr, min, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
 			return nil, 0, err
 		}
@@ -316,10 +323,12 @@ func launchdSchedule(s Spec, loc *time.Location) (slots []CalendarSlot, interval
 		if len(days) == 0 {
 			return nil, 0, errors.New("no month_days")
 		}
-		out := make([]CalendarSlot, len(days))
-		for i, dom := range days {
-			d, h, m := dom, hr, min
-			out[i] = CalendarSlot{Day: &d, Hour: &h, Minute: &m}
+		out := make([]CalendarSlot, 0, len(days)*len(clocks))
+		for _, dom := range days {
+			for _, hm := range clocks {
+				d, h, m := dom, hm[0], hm[1]
+				out = append(out, CalendarSlot{Day: &d, Hour: &h, Minute: &m})
+			}
 		}
 		return out, 0, nil
 	case "interval":

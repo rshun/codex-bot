@@ -26,8 +26,18 @@ type CronEntry struct {
 	Paused  bool
 }
 
-// CronExpr returns the 5-field cron expression for s in loc.
+// CronExpr returns the primary 5-field cron expression for s in loc.
 func (s Spec) CronExpr(loc *time.Location) (string, error) {
+	exprs, err := s.CronExprs(loc)
+	if err != nil {
+		return "", err
+	}
+	return exprs[0], nil
+}
+
+// CronExprs returns one or more 5-field cron expressions for s in loc.
+// When a daily/weekly/monthly/dates task has multiple times per day, one cron expression is returned per time.
+func (s Spec) CronExprs(loc *time.Location) ([]string, error) {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -35,22 +45,26 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 	case "once":
 		at, err := time.ParseInLocation(atLayout, s.At, loc)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return fmt.Sprintf("%d %d %d %d *", at.Minute(), at.Hour(), at.Day(), int(at.Month())), nil
+		return []string{fmt.Sprintf("%d %d %d %d *", at.Minute(), at.Hour(), at.Day(), int(at.Month()))}, nil
 	case "daily", "dates":
-		hour, minute, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return fmt.Sprintf("%d %d * * *", minute, hour), nil
+		out := make([]string, len(clocks))
+		for i, hm := range clocks {
+			out[i] = fmt.Sprintf("%d %d * * *", hm[1], hm[0])
+		}
+		return out, nil
 	case "weekly":
-		hour, minute, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
-			return "", errors.New("bad time")
+			return nil, errors.New("bad time")
 		}
 		if len(s.Weekdays) == 0 {
-			return "", errors.New("no weekdays")
+			return nil, errors.New("no weekdays")
 		}
 		days := make([]int, 0, len(s.Weekdays))
 		seen := map[int]bool{}
@@ -65,14 +79,19 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 		for i, d := range days {
 			parts[i] = strconv.Itoa(d)
 		}
-		return fmt.Sprintf("%d %d * * %s", minute, hour, strings.Join(parts, ",")), nil
+		dow := strings.Join(parts, ",")
+		out := make([]string, len(clocks))
+		for i, hm := range clocks {
+			out[i] = fmt.Sprintf("%d %d * * %s", hm[1], hm[0], dow)
+		}
+		return out, nil
 	case "monthly":
-		hour, minute, err := clock(s.Time)
+		clocks, err := s.clocks()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if len(s.MonthDays) == 0 {
-			return "", errors.New("no month_days")
+			return nil, errors.New("no month_days")
 		}
 		seen := map[int]bool{}
 		hasLast := false
@@ -87,7 +106,7 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 			}
 		}
 		if len(seen) == 0 && !hasLast {
-			return "", errors.New("invalid month_days")
+			return nil, errors.New("invalid month_days")
 		}
 		days := make([]int, 0, len(seen))
 		for d := range seen {
@@ -98,25 +117,34 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 		for i, d := range days {
 			parts[i] = strconv.Itoa(d)
 		}
-		return fmt.Sprintf("%d %d %s * *", minute, hour, strings.Join(parts, ",")), nil
+		dom := strings.Join(parts, ",")
+		out := make([]string, len(clocks))
+		for i, hm := range clocks {
+			out[i] = fmt.Sprintf("%d %d %s * *", hm[1], hm[0], dom)
+		}
+		return out, nil
 	case "cron":
-		return ParseCron(s.Cron)
+		expr, err := ParseCron(s.Cron)
+		if err != nil {
+			return nil, err
+		}
+		return []string{expr}, nil
 	case "interval":
 		if s.EveryMinutes <= 0 {
-			return "", errors.New("invalid interval")
+			return nil, errors.New("invalid interval")
 		}
 		if s.EveryMinutes < 60 {
-			return fmt.Sprintf("*/%d * * * *", s.EveryMinutes), nil
+			return []string{fmt.Sprintf("*/%d * * * *", s.EveryMinutes)}, nil
 		}
 		if s.EveryMinutes == 60 {
-			return "0 * * * *", nil
+			return []string{"0 * * * *"}, nil
 		}
 		if s.EveryMinutes%60 == 0 && s.EveryMinutes/60 <= 23 {
-			return fmt.Sprintf("0 */%d * * *", s.EveryMinutes/60), nil
+			return []string{fmt.Sprintf("0 */%d * * *", s.EveryMinutes/60)}, nil
 		}
-		return "* * * * *", nil
+		return []string{"* * * * *"}, nil
 	default:
-		return "", errors.New("unsupported schedule kind")
+		return nil, errors.New("unsupported schedule kind")
 	}
 }
 
@@ -133,8 +161,8 @@ func MergeCrontab(existing string, entries []CronEntry, loc *time.Location, comm
 		if err := json.Unmarshal([]byte(e.Spec), &spec); err != nil {
 			continue
 		}
-		expr, err := CronExprForEntry(spec, e.NextRun, loc)
-		if err != nil {
+		exprs, err := CronExprsForEntry(spec, e.NextRun, loc)
+		if err != nil || len(exprs) == 0 {
 			continue
 		}
 		if count == 0 {
@@ -145,7 +173,9 @@ func MergeCrontab(existing string, entries []CronEntry, loc *time.Location, comm
 		cmd := fmt.Sprintf("%s run-task %d", strings.TrimSpace(commandPrefix), e.ID)
 		if e.Paused {
 			fmt.Fprintf(&block, "# #%d [PAUSED] %s\n", e.ID, summary)
-			fmt.Fprintf(&block, "# %s %s\n", expr, cmd)
+			for _, expr := range exprs {
+				fmt.Fprintf(&block, "# %s %s\n", expr, cmd)
+			}
 			continue
 		}
 		extra := ""
@@ -153,7 +183,9 @@ func MergeCrontab(existing string, entries []CronEntry, loc *time.Location, comm
 			extra = fmt.Sprintf(", date_file: %s", spec.DateFile)
 		}
 		fmt.Fprintf(&block, "# #%d %s (next: %s%s)\n", e.ID, summary, e.NextRun.In(loc).Format(atLayout), extra)
-		fmt.Fprintf(&block, "%s %s\n", expr, cmd)
+		for _, expr := range exprs {
+			fmt.Fprintf(&block, "%s %s\n", expr, cmd)
+		}
 	}
 	if count > 0 {
 		block.WriteString(cronEnd + "\n")
@@ -188,30 +220,39 @@ func stripManagedBlock(existing string) string {
 	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
 }
 
-// CronExprForEntry returns the 5-field cron expression for spec, anchoring hourly/multi-hour
+// CronExprForEntry returns the primary 5-field cron expression for spec, anchoring hourly/multi-hour
 // intervals to nextRun's minute and hour offset when nextRun is known.
 func CronExprForEntry(s Spec, nextRun time.Time, loc *time.Location) (string, error) {
+	exprs, err := CronExprsForEntry(s, nextRun, loc)
+	if err != nil {
+		return "", err
+	}
+	return exprs[0], nil
+}
+
+// CronExprsForEntry returns one or more 5-field cron expressions for spec.
+func CronExprsForEntry(s Spec, nextRun time.Time, loc *time.Location) ([]string, error) {
 	if loc == nil {
 		loc = time.Local
 	}
 	if s.Kind == "interval" && !nextRun.IsZero() && s.EveryMinutes >= 60 {
 		nr := nextRun.In(loc)
 		if s.EveryMinutes == 60 {
-			return fmt.Sprintf("%d * * * *", nr.Minute()), nil
+			return []string{fmt.Sprintf("%d * * * *", nr.Minute())}, nil
 		}
 		if s.EveryMinutes%60 == 0 && s.EveryMinutes/60 <= 23 {
 			stepH := s.EveryMinutes / 60
 			if 24%stepH == 0 {
 				offset := nr.Hour() % stepH
 				if offset == 0 {
-					return fmt.Sprintf("%d */%d * * *", nr.Minute(), stepH), nil
+					return []string{fmt.Sprintf("%d */%d * * *", nr.Minute(), stepH)}, nil
 				}
-				return fmt.Sprintf("%d %d-23/%d * * *", nr.Minute(), offset, stepH), nil
+				return []string{fmt.Sprintf("%d %d-23/%d * * *", nr.Minute(), offset, stepH)}, nil
 			}
-			return fmt.Sprintf("%d * * * *", nr.Minute()), nil
+			return []string{fmt.Sprintf("%d * * * *", nr.Minute())}, nil
 		}
 	}
-	return s.CronExpr(loc)
+	return s.CronExprs(loc)
 }
 
 // Crontab synchronizes scheduled tasks with the OS user crontab.
