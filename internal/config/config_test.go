@@ -109,7 +109,7 @@ func TestLoadEnvFile(t *testing.T) {
 	t.Setenv("ALLOWED_USER_IDS", "1")
 	t.Setenv("BOT_ENV_FILE", "")
 	cfg, err := Load()
-	if err != nil || cfg.EnvFile != "/etc/codex-tg-bot.env" {
+	if err != nil || cfg.EnvFile != "/etc/codex-bot.env" {
 		t.Fatalf("%q %v", cfg.EnvFile, err)
 	}
 	t.Setenv("BOT_ENV_FILE", "/opt/bot/bot.env")
