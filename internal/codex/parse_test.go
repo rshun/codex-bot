@@ -21,11 +21,32 @@ func TestParseModels(t *testing.T) {
 }
 
 func TestValidModelName(t *testing.T) {
-	if !ValidModelName("gpt-5.4") || !ValidModelName("gpt-5.3-codex") {
+	if !ValidModelName("gpt-5.4") || !ValidModelName("gpt-5.3-codex") || !ValidModelName("gpt-6-astra") || !ValidModelName("gpt-6.1-sol") {
 		t.Fatal("expected valid model names")
 	}
 	if ValidModelName("-m") || ValidModelName("bad name") || ValidModelName("") {
 		t.Fatal("expected invalid model names to be rejected")
+	}
+}
+
+func TestParseModelListRPC(t *testing.T) {
+	raw := json.RawMessage(`{
+		"data": [
+			{"id": "openai.gpt-6-astra", "model": "gpt-6-astra", "isDefault": true},
+			{"id": "openai.gpt-6.1-sol", "model": "gpt-6.1-sol"},
+			{"id": "openai.gpt-6-luna", "model": "gpt-6-luna"},
+			{"id": "hidden-internal", "hidden": true}
+		]
+	}`)
+	got, err := ParseModelListRPC(raw)
+	if err != nil {
+		t.Fatalf("ParseModelListRPC: %v", err)
+	}
+	if got.Default != "gpt-6-astra" || got.Current != "gpt-6-astra" {
+		t.Fatalf("unexpected default/current: %+v", got)
+	}
+	if len(got.Names) != 3 || got.Names[0] != "gpt-6-astra" || got.Names[1] != "gpt-6.1-sol" || got.Names[2] != "gpt-6-luna" {
+		t.Fatalf("unexpected names: %v", got.Names)
 	}
 }
 

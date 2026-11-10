@@ -74,6 +74,79 @@ func ParseModels(raw string) ModelList {
 	return out
 }
 
+// ParseModelListRPC parses the JSON-RPC response from `codex app-server` `model/list`.
+func ParseModelListRPC(raw json.RawMessage) (ModelList, error) {
+	if len(raw) == 0 {
+		return ModelList{}, fmt.Errorf("empty model/list response")
+	}
+	type modelEntry struct {
+		ID        string `json:"id"`
+		Model     string `json:"model"`
+		Slug      string `json:"slug"`
+		Name      string `json:"name"`
+		IsDefault bool   `json:"isDefault"`
+		Default   bool   `json:"default"`
+		Hidden    bool   `json:"hidden"`
+	}
+	var payload struct {
+		Data         []modelEntry `json:"data"`
+		Models       []modelEntry `json:"models"`
+		Items        []modelEntry `json:"items"`
+		DefaultModel string       `json:"defaultModel"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		// Also accept a top-level JSON array of model entries.
+		var arr []modelEntry
+		if arrErr := json.Unmarshal(raw, &arr); arrErr != nil {
+			return ModelList{}, fmt.Errorf("decode model/list: %w", err)
+		}
+		payload.Data = arr
+	}
+	entries := payload.Data
+	if len(entries) == 0 {
+		entries = payload.Models
+	}
+	if len(entries) == 0 {
+		entries = payload.Items
+	}
+	var out ModelList
+	out.Default = strings.TrimSpace(payload.DefaultModel)
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.Hidden {
+			continue
+		}
+		name := strings.TrimSpace(e.Model)
+		if name == "" {
+			name = strings.TrimSpace(e.Slug)
+		}
+		if name == "" {
+			name = strings.TrimSpace(e.ID)
+		}
+		if name == "" {
+			name = strings.TrimSpace(e.Name)
+		}
+		name = strings.TrimPrefix(name, "openai.")
+		name = strings.TrimPrefix(name, "openai/")
+		if !ValidModelName(name) || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out.Available = append(out.Available, name)
+		out.Names = append(out.Names, name)
+		if (e.IsDefault || e.Default) && out.Default == "" {
+			out.Default = name
+		}
+	}
+	if out.Default != "" && out.Current == "" {
+		out.Current = out.Default
+	} else if out.Current == "" && len(out.Names) > 0 {
+		out.Default = out.Names[0]
+		out.Current = out.Names[0]
+	}
+	return out, nil
+}
+
 // QuotaWindow holds one rate-limit window (e.g., primary 5h or secondary 7d).
 type QuotaWindow struct {
 	UsedPercent        int

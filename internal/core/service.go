@@ -488,8 +488,8 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 	if arg == "" {
 		return formatModels(chat.Model, list), modelButtons(chat.Model, list), nil
 	}
-	if !codex.ValidModelName(arg) || !containsModel(list, arg) {
-		return "没有这个模型。用 /model 查看可用模型。", modelButtons(chat.Model, list), nil
+	if !codex.ValidModelName(arg) {
+		return "模型名称格式不合法。用 /model 查看可用模型。", modelButtons(chat.Model, list), nil
 	}
 	if err := s.Store.SetModel(ctx, in.Platform, in.ChatID, arg); err != nil {
 		return "", nil, err
@@ -845,15 +845,6 @@ func formatModels(current string, list codex.ModelList) string {
 		fmt.Fprintf(&b, "- %s（当前，不在本次列表里）\n", current)
 	}
 	return strings.TrimSpace(b.String())
-}
-
-func containsModel(list codex.ModelList, name string) bool {
-	for _, item := range list.Names {
-		if item == name {
-			return true
-		}
-	}
-	return false
 }
 
 func sessionMissing(err error) bool {
