@@ -56,3 +56,23 @@ func TestParseStreamTurnFailed(t *testing.T) {
 		t.Fatalf("unexpected RunError: %+v", re)
 	}
 }
+
+func TestParseStreamTopLevelErrorStringMessage(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"t_456"}`,
+		`{"type":"error","message":"Reconnecting... 1/5"}`,
+		`{"type":"error","message":"invalid_request_error: unknown model"}`,
+	}, "\n")
+
+	_, err := ParseStream(strings.NewReader(stream), nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	re, ok := err.(*RunError)
+	if !ok {
+		t.Fatalf("expected *RunError, got %T", err)
+	}
+	if re.Message != "invalid_request_error: unknown model" || re.SessionID != "t_456" {
+		t.Fatalf("unexpected RunError: %+v", re)
+	}
+}

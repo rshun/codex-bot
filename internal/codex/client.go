@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -165,6 +166,12 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 		}
 	}
 	if streamErr != nil {
+		var re *RunError
+		if errors.As(streamErr, &re) && (re.Message == "" || re.Message == "Codex CLI reported an unknown error.") {
+			if s := summarizeStderr(stderr.String()); s != "" {
+				re.Message = s
+			}
+		}
 		return HeadlessResult{}, streamErr
 	}
 	if waitErr != nil && strings.TrimSpace(res.Text) == "" && len(res.Structured) == 0 {
@@ -234,21 +241,32 @@ func (c *Client) buildArgs(opts ReplyOptions) ([]string, func(), error) {
 
 		args = append(args,
 			"--output-schema", schemaPath,
-			"--sandbox", "read-only",
-			"--ephemeral",
+			"-c", `sandbox_mode="read-only"`,
 			"-c", `web_search="disabled"`,
 			"--disable", "shell_tool",
 		)
+		if !resuming {
+			args = append(args, "--ephemeral")
+		}
 	} else {
-		if len(opts.WriteDirs) > 0 {
-			args = append(args, "--sandbox", "workspace-write")
-			for _, d := range opts.WriteDirs {
-				if d != "" {
+		var cleanDirs []string
+		for _, d := range opts.WriteDirs {
+			if strings.TrimSpace(d) != "" {
+				cleanDirs = append(cleanDirs, strings.TrimSpace(d))
+			}
+		}
+		if len(cleanDirs) > 0 {
+			args = append(args, "-c", `sandbox_mode="workspace-write"`)
+			if resuming {
+				b, _ := json.Marshal(cleanDirs)
+				args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(b))
+			} else {
+				for _, d := range cleanDirs {
 					args = append(args, "--add-dir", d)
 				}
 			}
 		} else {
-			args = append(args, "--sandbox", "read-only")
+			args = append(args, "-c", `sandbox_mode="read-only"`)
 		}
 		if !opts.ShellTools {
 			args = append(args, "--disable", "shell_tool")
@@ -351,19 +369,26 @@ func sanitizeMemoryLine(s string) string {
 }
 
 // DefaultModels is the built-in curated model list when no models are configured
-// and the Codex CLI does not provide a `models` subcommand.
+// and the Codex CLI cannot be queried via `codex app-server` `model/list`.
 var DefaultModels = []string{
+	"gpt-6-astra",
+	"gpt-6.1-sol",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-5.6-sol",
 	"gpt-5.4",
 	"gpt-5.3-codex",
-	"o3",
-	"o4-mini",
 	"codex-mini-latest",
 }
 
-// Models returns the available model list. It first attempts `codex models` and
-// falls back to Client.ModelsList or DefaultModels if the CLI does not support
-// the subcommand.
+// Models returns the available model list. It first queries `codex app-server`
+// (`model/list` JSON-RPC), then attempts `codex models`, and falls back to
+// Client.ModelsList or DefaultModels.
 func (c *Client) Models(ctx context.Context) (ModelList, error) {
+	if res, err := c.modelsFromAppServer(ctx); err == nil && len(res.Names) > 0 {
+		return c.mergeConfiguredModels(res), nil
+	}
+
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -376,38 +401,165 @@ func (c *Client) Models(ctx context.Context) (ModelList, error) {
 	if err == nil {
 		res := ParseModels(string(out))
 		if len(res.Names) > 0 {
-			if res.Current == "" {
-				res.Current = c.DefaultModel
-			}
-			if res.Default == "" {
-				res.Default = res.Current
-			}
-			return res, nil
+			return c.mergeConfiguredModels(res), nil
 		}
 	}
 
-	models := c.ModelsList
-	if len(models) == 0 {
-		models = DefaultModels
-	}
-	cur := c.DefaultModel
-	if cur == "" && len(models) > 0 {
-		cur = models[0]
-	}
-	seen := make(map[string]bool, len(models)+1)
+	return c.mergeConfiguredModels(ModelList{}), nil
+}
+
+func (c *Client) mergeConfiguredModels(res ModelList) ModelList {
+	seen := make(map[string]bool, len(res.Names)+len(c.ModelsList)+len(DefaultModels)+1)
 	var avail []string
-	if cur != "" {
-		avail = append(avail, cur)
-		seen[cur] = true
-	}
-	for _, m := range models {
+	add := func(m string) {
 		m = strings.TrimSpace(m)
-		if m != "" && !seen[m] {
+		if m != "" && ValidModelName(m) && !seen[m] {
 			seen[m] = true
 			avail = append(avail, m)
 		}
 	}
-	return ModelList{Default: cur, Current: cur, Names: avail, Available: avail}, nil
+	for _, m := range res.Names {
+		add(m)
+	}
+	for _, m := range c.ModelsList {
+		add(m)
+	}
+	if len(avail) == 0 {
+		add(c.DefaultModel)
+		for _, m := range DefaultModels {
+			add(m)
+		}
+	} else if c.DefaultModel != "" {
+		add(c.DefaultModel)
+	}
+	cur := res.Current
+	if cur == "" {
+		cur = c.DefaultModel
+	}
+	if cur == "" && len(avail) > 0 {
+		cur = avail[0]
+	}
+	def := res.Default
+	if def == "" {
+		def = cur
+	}
+	return ModelList{Default: def, Current: cur, Names: avail, Available: avail}
+}
+
+func (c *Client) modelsFromAppServer(ctx context.Context) (ModelList, error) {
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, c.bin(), "app-server")
+	if c.Workspace != "" {
+		cmd.Dir = c.Workspace
+	}
+	cmd.Env = envWithoutUpdate()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return ModelList{}, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return ModelList{}, err
+	}
+	var stderr limitedBuffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return ModelList{}, err
+	}
+
+	var closeOnce sync.Once
+	shutdown := func() {
+		closeOnce.Do(func() {
+			_ = stdin.Close()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		})
+	}
+	defer shutdown()
+
+	writeRPC := func(msg map[string]any) error {
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		b = append(b, '\n')
+		_, err = stdin.Write(b)
+		return err
+	}
+
+	if err := writeRPC(map[string]any{
+		"id":     0,
+		"method": "initialize",
+		"params": map[string]any{
+			"clientInfo": map[string]any{
+				"name":    "codex_bot",
+				"title":   "Codex Bot",
+				"version": "2.0.0",
+			},
+			"capabilities": map[string]any{
+				"experimentalApi": true,
+			},
+		},
+	}); err != nil {
+		return ModelList{}, err
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+
+	var (
+		modelsResult json.RawMessage
+		gotModels    bool
+		rpcErr       error
+	)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var msg struct {
+			ID     *int            `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &msg); err != nil || msg.ID == nil {
+			continue
+		}
+		if msg.Error != nil && msg.Error.Message != "" {
+			rpcErr = fmt.Errorf("%s", msg.Error.Message)
+			break
+		}
+		switch *msg.ID {
+		case 0:
+			_ = writeRPC(map[string]any{"method": "initialized", "params": map[string]any{}})
+			_ = writeRPC(map[string]any{"id": 1, "method": "model/list", "params": map[string]any{}})
+		case 1:
+			modelsResult = msg.Result
+			gotModels = true
+		}
+		if gotModels {
+			break
+		}
+	}
+
+	shutdown()
+	_ = cmd.Wait()
+
+	if rpcErr != nil {
+		return ModelList{}, rpcErr
+	}
+	if !gotModels {
+		return ModelList{}, fmt.Errorf("codex app-server exited before returning model/list")
+	}
+	return ParseModelListRPC(modelsResult)
 }
 
 // ResetLeader clears any cached leader state in the workspace if present.

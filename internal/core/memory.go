@@ -408,7 +408,7 @@ func matchMemoryPrefix(line string) (string, bool) {
 		"添加长期记忆", "新增长期记忆", "写入长期记忆", "保存长期记忆",
 		"记入长期记忆", "加入长期记忆", "记住长期记忆", "存入长期记忆",
 		"设置长期记忆", "设为长期记忆", "这是长期记忆", "作为长期记忆",
-		"长期记忆", "永久记忆", "永久记住", "长期记住",
+		"长期记忆", "永久记忆", "永久记住", "长期记住", "长期记", "永久记",
 	}
 	for _, p := range prefixes {
 		if !strings.HasPrefix(s, p) {
@@ -420,7 +420,7 @@ func matchMemoryPrefix(line string) (string, bool) {
 		}
 		r, size := utf8.DecodeRuneInString(rem)
 		switch r {
-		case '：', ':', '，', ',', '-', '—', ' ', '\t':
+		case '：', ':', '，', ',', '。', '.', '-', '—', ' ', '\t':
 			return cleanMemoryContent(rem[size:]), true
 		}
 	}

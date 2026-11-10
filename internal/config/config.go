@@ -18,7 +18,7 @@ const (
 )
 
 // Config is the process configuration. Secrets come from the environment,
-// which systemd loads from /etc/codex-tg-bot.env.
+// which systemd loads from /etc/codex-bot.env.
 type Config struct {
 	TelegramToken string
 	DiscordToken  string
@@ -150,7 +150,7 @@ func Load() (Config, error) {
 	}
 	envFile := strings.TrimSpace(os.Getenv("BOT_ENV_FILE"))
 	if envFile == "" {
-		envFile = "/etc/codex-tg-bot.env"
+		envFile = "/etc/codex-bot.env"
 	}
 	location := time.Local
 	if raw := strings.TrimSpace(os.Getenv("TIMEZONE")); raw != "" {

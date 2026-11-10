@@ -7,8 +7,8 @@ Wants=network-online.target
 Type=simple
 # The account that has already run `codex login`.
 User=codex
-EnvironmentFile=/etc/codex-tg-bot.env
-ExecStart=/usr/local/bin/codex-tg-bot
+EnvironmentFile=/etc/codex-bot.env
+ExecStart=/usr/local/bin/codex-bot
 Restart=on-failure
 RestartSec=3
 

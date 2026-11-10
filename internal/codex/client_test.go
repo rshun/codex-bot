@@ -25,8 +25,8 @@ func TestBuildArgsAndPermissions(t *testing.T) {
 		if len(args) < 3 || args[0] != "exec" || args[1] != "--json" {
 			t.Fatalf("expected exec --json, got %v", args)
 		}
-		if !slices.Contains(args, "read-only") {
-			t.Fatalf("expected --sandbox read-only, got %v", args)
+		if !slices.Contains(args, `sandbox_mode="read-only"`) {
+			t.Fatalf("expected -c sandbox_mode=\"read-only\", got %v", args)
 		}
 		if !slices.Contains(args, `web_search="disabled"`) {
 			t.Fatalf("expected web_search disabled, got %v", args)
@@ -55,11 +55,11 @@ func TestBuildArgsAndPermissions(t *testing.T) {
 		if len(args) < 2 || args[0] != "exec" || args[1] != "resume" {
 			t.Fatalf("expected exec resume, got %v", args)
 		}
-		if !slices.Contains(args, "workspace-write") {
-			t.Fatalf("expected --sandbox workspace-write, got %v", args)
+		if !slices.Contains(args, `sandbox_mode="workspace-write"`) {
+			t.Fatalf("expected -c sandbox_mode=\"workspace-write\", got %v", args)
 		}
-		if !slices.Contains(args, "/tmp/work") {
-			t.Fatalf("expected --add-dir /tmp/work, got %v", args)
+		if !slices.Contains(args, `sandbox_workspace_write.writable_roots=["/tmp/work"]`) {
+			t.Fatalf("expected writable_roots override, got %v", args)
 		}
 		if slices.Contains(args, "shell_tool") {
 			t.Fatalf("did not expect --disable shell_tool when ShellTools=true: %v", args)

@@ -94,7 +94,7 @@ func (b *Bot) send(ctx context.Context, chatID, text string, messageID int) erro
 	return nil
 }
 
-// MarkReceived uses the same receipt reaction as codex-tg-bot.
+// MarkReceived adds a lightweight 👀 receipt reaction on incoming messages.
 func (b *Bot) MarkReceived(ctx context.Context, in platform.Inbound) error {
 	if err := ctx.Err(); err != nil {
 		return err

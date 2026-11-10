@@ -70,7 +70,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o codex-bot ./cmd/codex-bot
 
 #### 3. 配置文件与 `systemd` 启动（Linux 示例）
 
-复制仓库内的 `deploy/codex-tg-bot.env.example` 到 `/etc/codex-tg-bot.env`（注意设置权限仅管理员或服务用户可读，切勿提交真实密钥）：
+复制仓库内的 `deploy/codex-bot.env.example` 到 `/etc/codex-bot.env`（注意设置权限仅管理员或服务用户可读，切勿提交真实密钥）：
 
 ```dotenv
 # Telegram 与 Discord 可任选其一，或同时配置双平台
@@ -80,8 +80,8 @@ ALLOWED_USER_IDS=123456789
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 DISCORD_ALLOWED_USER_IDS=987654321012345678
 
-DATA_DIR=/var/lib/codex-tg-bot
-BOT_ENV_FILE=/etc/codex-tg-bot.env
+DATA_DIR=/var/lib/codex-bot
+BOT_ENV_FILE=/etc/codex-bot.env
 DEFAULT_MODEL=gpt-5.4
 CODEX_BIN=codex
 
@@ -97,14 +97,14 @@ SCRIPT_DIRS=/home/codex/bin
 SCRIPT_TIMEOUT=30m
 ```
 
-安装二进制与 `systemd` 单元并启动服务（请确认 `deploy/codex-tg-bot.service` 中的 `User=` 与已执行 `codex login` 的系统用户一致）：
+安装二进制与 `systemd` 单元并启动服务（请确认 `deploy/codex-bot.service` 中的 `User=` 与已执行 `codex login` 的系统用户一致）：
 
 ```sh
-sudo install -m 0755 codex-bot /usr/local/bin/codex-tg-bot
-sudo install -d -o codex -g codex /var/lib/codex-tg-bot
-sudo cp deploy/codex-tg-bot.service /etc/systemd/system/codex-tg-bot.service
+sudo install -m 0755 codex-bot /usr/local/bin/codex-bot
+sudo install -d -o codex -g codex /var/lib/codex-bot
+sudo cp deploy/codex-bot.service /etc/systemd/system/codex-bot.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now codex-tg-bot
+sudo systemctl enable --now codex-bot
 ```
 
 ---
@@ -118,7 +118,7 @@ sudo systemctl enable --now codex-tg-bot
 | `DISCORD_BOT_TOKEN` | 二选一 | - | Discord 机器人 Token |
 | `DISCORD_ALLOWED_USER_IDS` | 配 DC 必填 | - | 允许访问的 Discord 数字用户 ID，多个用英文逗号分隔 |
 | `DATA_DIR` | 否 | `data` | SQLite 数据库（`bot.db`）、工作区与任务日志存储目录 |
-| `BOT_ENV_FILE` | 否 | `/etc/codex-tg-bot.env` | 环境配置文件路径（自动加入沙箱与发文件黑名单） |
+| `BOT_ENV_FILE` | 否 | `/etc/codex-bot.env` | 环境配置文件路径（自动加入沙箱与发文件黑名单） |
 | `DEFAULT_MODEL` | 否 | `gpt-5.4` | 新会话默认使用的 Codex 模型名称 |
 | `CODEX_MODELS` | 否 | 内置候选集 | `/model` 候选模型列表（英文逗号分隔） |
 | `CODEX_BIN` | 否 | `codex` | `codex` CLI 可执行文件路径 |
@@ -218,7 +218,7 @@ sudo systemctl enable --now codex-tg-bot
 
 #### 5. 本机命令行主动推送 (`codex-bot send`)
 
-服务器上的外部脚本、定时任务或监控程序无需另写机器人客户端，直接调用 `codex-bot send` 即可推送消息与附件（自动探测程序目录或 `/etc/codex-tg-bot.env` 配置，并复用发文件安全黑名单校验）：
+服务器上的外部脚本、定时任务或监控程序无需另写机器人客户端，直接调用 `codex-bot send` 即可推送消息与附件（自动探测程序目录或 `/etc/codex-bot.env` 配置，并复用发文件安全黑名单校验）：
 
 ```sh
 # 1. 默认同时推送到所有已配置平台（Telegram + Discord）的最近活跃私聊
@@ -258,12 +258,12 @@ df -h | codex-bot send
 
 ```sh
 # 1. 停止服务并备份数据库
-sudo systemctl stop codex-tg-bot
-sudo cp -p /var/lib/codex-tg-bot/bot.db /var/lib/codex-tg-bot/bot.db.bak-$(date +%Y%m%d)
+sudo systemctl stop codex-bot
+sudo cp -p /var/lib/codex-bot/bot.db /var/lib/codex-bot/bot.db.bak-$(date +%Y%m%d)
 
 # 2. 使用内置升级脚本（需已登录 gh CLI）或手动替换新二进制后启动
 sudo sh deploy/upgrade.sh
-# 若手动替换二进制，执行：sudo systemctl start codex-tg-bot
+# 若手动替换二进制，执行：sudo systemctl start codex-bot
 ```
 
 > 如需回滚，停止服务后恢复旧版二进制并重启即可。
@@ -287,7 +287,7 @@ go test -mod=readonly ./...
 #### 常见故障排查
 
 - **提示 `unknown model` 或模型不可用**：表示当前会话绑定的模型名称在当前 `codex` CLI 版本或订阅中不可用。请在报错平台发送 `/model` 查看当前候选模型列表，再点击按钮或发送 `/model <可用模型名>` 切换即可（**切勿先发 `/reset`**，切换模型可直接保留原有会话上下文）。
-- **排查 CLI 与服务日志**：可在服务器以只读方式检查 `codex --version` 及 `sudo journalctl -u codex-tg-bot -n 60 --no-pager`（对外分享日志前请注意脱敏隐藏 Token、Session ID 与用户 ID）。
+- **排查 CLI 与服务日志**：可在服务器以只读方式检查 `codex --version` 及 `sudo journalctl -u codex-bot -n 60 --no-pager`（对外分享日志前请注意脱敏隐藏 Token、Session ID 与用户 ID）。
 
 ---
 ---
@@ -355,7 +355,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o codex-bot ./cmd/codex-bot
 
 #### 3. Configure & Run with `systemd` (Linux)
 
-Copy `deploy/codex-tg-bot.env.example` to `/etc/codex-tg-bot.env` (restrict file permissions and never commit real credentials):
+Copy `deploy/codex-bot.env.example` to `/etc/codex-bot.env` (restrict file permissions and never commit real credentials):
 
 ```dotenv
 # Configure Telegram, Discord, or both
@@ -365,8 +365,8 @@ ALLOWED_USER_IDS=123456789
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 DISCORD_ALLOWED_USER_IDS=987654321012345678
 
-DATA_DIR=/var/lib/codex-tg-bot
-BOT_ENV_FILE=/etc/codex-tg-bot.env
+DATA_DIR=/var/lib/codex-bot
+BOT_ENV_FILE=/etc/codex-bot.env
 DEFAULT_MODEL=gpt-5.4
 CODEX_BIN=codex
 
@@ -382,14 +382,14 @@ SCRIPT_DIRS=/home/codex/bin
 SCRIPT_TIMEOUT=30m
 ```
 
-Install the binary and `systemd` unit (ensure `User=` in `deploy/codex-tg-bot.service` matches the user that ran `codex login`):
+Install the binary and `systemd` unit (ensure `User=` in `deploy/codex-bot.service` matches the user that ran `codex login`):
 
 ```sh
-sudo install -m 0755 codex-bot /usr/local/bin/codex-tg-bot
-sudo install -d -o codex -g codex /var/lib/codex-tg-bot
-sudo cp deploy/codex-tg-bot.service /etc/systemd/system/codex-tg-bot.service
+sudo install -m 0755 codex-bot /usr/local/bin/codex-bot
+sudo install -d -o codex -g codex /var/lib/codex-bot
+sudo cp deploy/codex-bot.service /etc/systemd/system/codex-bot.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now codex-tg-bot
+sudo systemctl enable --now codex-bot
 ```
 
 ---
@@ -403,7 +403,7 @@ sudo systemctl enable --now codex-tg-bot
 | `DISCORD_BOT_TOKEN` | Either | - | Discord Bot token |
 | `DISCORD_ALLOWED_USER_IDS` | If DC enabled | - | Comma-separated numeric Discord user IDs allowed to use the bot |
 | `DATA_DIR` | No | `data` | Directory for SQLite (`bot.db`), workspace, and task logs |
-| `BOT_ENV_FILE` | No | `/etc/codex-tg-bot.env` | Path to the bot `.env` file (automatically blocked from Codex reads/sends) |
+| `BOT_ENV_FILE` | No | `/etc/codex-bot.env` | Path to the bot `.env` file (automatically blocked from Codex reads/sends) |
 | `DEFAULT_MODEL` | No | `gpt-5.4` | Default Codex model for new chat sessions |
 | `CODEX_MODELS` | No | Built-in list | Comma-separated candidate models shown in `/model` |
 | `CODEX_BIN` | No | `codex` | Path or name of the `codex` CLI executable |
@@ -542,8 +542,8 @@ Always back up `bot.db` before upgrading (replacing the binary preserves all ses
 
 ```sh
 # 1. Stop service and back up SQLite database
-sudo systemctl stop codex-tg-bot
-sudo cp -p /var/lib/codex-tg-bot/bot.db /var/lib/codex-tg-bot/bot.db.bak-$(date +%Y%m%d)
+sudo systemctl stop codex-bot
+sudo cp -p /var/lib/codex-bot/bot.db /var/lib/codex-bot/bot.db.bak-$(date +%Y%m%d)
 
 # 2. Upgrade via helper script (requires authenticated gh CLI) or replace binary manually
 sudo sh deploy/upgrade.sh
@@ -562,4 +562,4 @@ GOTOOLCHAIN=local GOPROXY=off go test -mod=readonly ./...
 #### Troubleshooting
 
 - **`unknown model` error**: Indicates the model previously selected for that chat is not available in your `codex` CLI version or account. Run `/model` in that chat to view candidate models and switch via `/model <name>` (**do not run `/reset` first**, as switching models preserves your conversation context).
-- **Inspecting Logs**: Check `codex --version` and `sudo journalctl -u codex-tg-bot -n 60 --no-pager` in read-only mode. Always redact tokens, session IDs, and user IDs before sharing logs.
+- **Inspecting Logs**: Check `codex --version` and `sudo journalctl -u codex-bot -n 60 --no-pager` in read-only mode. Always redact tokens, session IDs, and user IDs before sharing logs.

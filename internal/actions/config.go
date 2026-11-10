@@ -25,7 +25,6 @@ func renderConfig(port int) string {
 	b.WriteString("[mcp_servers.codexbot]\n")
 	fmt.Fprintf(&b, "url = \"http://127.0.0.1:%d/mcp\"\n", port)
 	b.WriteString("bearer_token_env_var = \"" + TokenEnv + "\"\n")
-	b.WriteString("headers = { Authorization = \"Bearer ${" + TokenEnv + "}\" }\n")
 	return b.String()
 }
 

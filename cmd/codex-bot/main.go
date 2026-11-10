@@ -324,7 +324,7 @@ func executableDirs() []string {
 }
 
 func envCandidatePaths(botEnvFile string, exeDirs []string) []string {
-	paths := []string{botEnvFile, "/etc/codex-tg-bot.env", ".env"}
+	paths := []string{botEnvFile, "/etc/codex-bot.env", ".env"}
 	for _, dir := range exeDirs {
 		if dir != "" {
 			paths = append(paths, filepath.Join(dir, ".env"))
