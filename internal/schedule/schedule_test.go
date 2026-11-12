@@ -166,6 +166,10 @@ func TestDecode(t *testing.T) {
 	if err != nil || got.Kind != "dates" || got.Time != "09:00" || got.DateFile != "/srv/dates.txt" {
 		t.Fatalf("date_file decode: %#v %v", got, err)
 	}
+	got, err = Decode(json.RawMessage(`{"kind":"daily","time":"09:00","target_platform":"tg","prompt":"p","summary":"s"}`), "")
+	if err != nil || got.TargetPlatform != "telegram" {
+		t.Fatalf("target_platform decode: %#v %v", got, err)
+	}
 }
 
 func TestPromptContainsNowAndZone(t *testing.T) {
@@ -173,6 +177,14 @@ func TestPromptContainsNowAndZone(t *testing.T) {
 	for _, want := range []string{"2026-10-19 10:30", "CST", "每天九点看新闻"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("missing %q in %s", want, p)
+		}
+	}
+	pPlat := PromptForPlatform("telegram", "每天九点看新闻，只推当前平台", time.Date(2026, 10, 19, 2, 30, 0, 0, time.UTC), loc, ExistingTask{
+		ID: 1, Summary: "早报", Prompt: "看新闻", TargetPlatform: "discord", NextRun: at(20, 9, 0, 0),
+	})
+	for _, want := range []string{"Current chat platform: telegram.", "push: discord only"} {
+		if !strings.Contains(pPlat, want) {
+			t.Fatalf("missing %q in %s", want, pPlat)
 		}
 	}
 	if !json.Valid([]byte(Schema)) {

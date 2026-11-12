@@ -598,3 +598,136 @@ func TestInitSchedulerAndNativeSyncStatus(t *testing.T) {
 		t.Fatalf("expected sync failure in /status, got:\n%s", statusWarn)
 	}
 }
+
+func TestSinglePlatformAndDefaultAllPlatformDelivery(t *testing.T) {
+	ctx := context.Background()
+	tgOnlyJSON := `{"action":"create","task_id":0,"kind":"daily","at":"","time":"09:00","times":[],"weekdays":[],"month_days":[],"every_minutes":0,"date_file":"","cron":"","target_platform":"telegram","prompt":"看新闻","summary":"每天 09:00：看新闻","error":""}`
+	svc, engine, tgSent := taskService(t, tgOnlyJSON)
+	dcRec := &recorder{}
+	dcSender := &fakeDiscordSender{rec: dcRec}
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders[platform.Discord] = dcSender
+
+	// 1. Create TG-only task in natural language.
+	cmdReply := &recorder{}
+	say(svc, cmdReply, "/task 每天九点看新闻，只推TG")
+	gotCreate := cmdReply.wait(t, 1)[0]
+	if !strings.Contains(gotCreate, "已创建 #1") || !strings.Contains(gotCreate, "（仅推送 Telegram）") {
+		t.Fatalf("unexpected TG-only create reply: %q", gotCreate)
+	}
+
+	// 2. Create Discord-only cron task via `-p dc` flag (0 LLM calls).
+	engine.mu.Lock()
+	callsBeforeCron := len(engine.calls)
+	engine.mu.Unlock()
+	say(svc, cmdReply, "/task cron -p dc 0 10 * * * 汇总日报")
+	gotCron := cmdReply.wait(t, 2)[1]
+	if !strings.Contains(gotCron, "已创建 #2") || !strings.Contains(gotCron, "（仅推送 Discord）") {
+		t.Fatalf("unexpected DC-only cron reply: %q", gotCron)
+	}
+	engine.mu.Lock()
+	if len(engine.calls) != callsBeforeCron {
+		t.Fatalf("cron create should not call engine")
+	}
+	engine.mu.Unlock()
+
+	// 3. `/task list` shows `[仅 TG]` and `[仅 Discord]` badges.
+	say(svc, cmdReply, "/task list")
+	gotList := cmdReply.wait(t, 3)[2]
+	if !strings.Contains(gotList, "#1 [仅 TG]") || !strings.Contains(gotList, "#2 [仅 Discord]") {
+		t.Fatalf("expected platform badges in /task list, got:\n%s", gotList)
+	}
+
+	// 4. Fire #1 at 09:00 -> ONLY Telegram receives it; Discord stays empty.
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	gotTG := tgSent.wait(t, 1)
+	if !strings.Contains(gotTG[0], "⏰ 定时任务 #1") {
+		t.Fatalf("TG missing #1 output: %#v", gotTG)
+	}
+	dcRec.mu.Lock()
+	dcCount := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if dcCount != 0 {
+		t.Fatalf("expected 0 Discord messages for TG-only task, got %d: %#v", dcCount, dcRec.msgs)
+	}
+
+	// 5. Fire #2 at 10:00 -> ONLY Discord receives it; Telegram count stays 1.
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 10, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	gotDC := dcRec.wait(t, 1)
+	if !strings.Contains(gotDC[0], "⏰ 定时任务 #2") {
+		t.Fatalf("Discord missing #2 output: %#v", gotDC)
+	}
+	tgSent.mu.Lock()
+	tgCount := len(tgSent.msgs)
+	tgSent.mu.Unlock()
+	if tgCount != 1 {
+		t.Fatalf("expected Telegram message count to remain 1 for DC-only task, got %d", tgCount)
+	}
+
+	// 6. Manual `/task run 2` invoked from Telegram pushes output ONLY to Discord and confirms on Telegram.
+	say(svc, cmdReply, "/task run 2")
+	gotRunConfirm := cmdReply.wait(t, 4)[3]
+	if !strings.Contains(gotRunConfirm, "结果已仅推送至 Discord") {
+		t.Fatalf("unexpected cross-platform trial reply on TG: %q", gotRunConfirm)
+	}
+	dcRec.wait(t, 2)
+
+	// 7. `/task platform 1 all` switches #1 back to all-platform push without calling Codex.
+	engine.mu.Lock()
+	callsBeforePlat := len(engine.calls)
+	engine.mu.Unlock()
+	say(svc, cmdReply, "/task platform 1 all")
+	gotPlat := cmdReply.wait(t, 5)[4]
+	if !strings.Contains(gotPlat, "已设置 #1") || !strings.Contains(gotPlat, "全平台推送") {
+		t.Fatalf("unexpected /task platform reply: %q", gotPlat)
+	}
+	engine.mu.Lock()
+	if len(engine.calls) != callsBeforePlat {
+		t.Fatalf("/task platform must not call Codex")
+	}
+	engine.mu.Unlock()
+
+	// Next day 09:00 -> #1 now pushes to BOTH Telegram and Discord!
+	svc.Now = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	tgSent.wait(t, 2)
+	dcRec.wait(t, 3)
+
+	// 8. Natural-language platform-only update (without changing schedule) works cleanly.
+	engine.mu.Lock()
+	engine.replyFor = func(opts codex.ReplyOptions) (codex.HeadlessResult, error) {
+		if opts.JSONSchema != "" {
+			return codex.HeadlessResult{
+				SessionID:  opts.SessionID,
+				Structured: json.RawMessage(`{"action":"update","task_id":2,"kind":"","at":"","time":"","times":[],"weekdays":[],"month_days":[],"every_minutes":0,"date_file":"","cron":"","target_platform":"all","prompt":"","summary":"","error":""}`),
+			}, nil
+		}
+		return codex.HeadlessResult{Text: "新闻", SessionID: opts.SessionID}, nil
+	}
+	engine.mu.Unlock()
+	say(svc, cmdReply, "把任务2改成全平台推送")
+	gotNLUpdate := cmdReply.wait(t, 6)[5]
+	if !strings.Contains(gotNLUpdate, "已设置 #2") || !strings.Contains(gotNLUpdate, "全平台推送") {
+		t.Fatalf("unexpected natural-language platform update reply: %q", gotNLUpdate)
+	}
+	t2, ok, _ := svc.Store.TaskByID(ctx, 2)
+	if !ok || t2.TargetPlatform != "" {
+		t.Fatalf("expected #2 TargetPlatform cleared, got %#v", t2)
+	}
+
+	// 9. Reject targeting an unconfigured platform.
+	delete(svc.Senders, platform.Discord)
+	say(svc, cmdReply, "/task platform 1 dc")
+	gotUnconf := cmdReply.wait(t, 7)[6]
+	if !strings.Contains(gotUnconf, "未配置 Discord") {
+		t.Fatalf("expected unconfigured Discord warning, got: %q", gotUnconf)
+	}
+}

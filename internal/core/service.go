@@ -810,9 +810,11 @@ func helpText(version string) string {
 /memory
     查看或管理长期记忆（TG / Discord 自动同步，执行 /reset 后仍会保留）
 /task 一句话
-    创建或管理定时任务（TG / Discord 共享并同时推送，支持每天/每周/每月/最后一天/工作日/5段Cron）
+    创建或管理定时任务（默认全平台推送，可说「只推TG」「只推Discord」或加 -p tg / -p dc 单平台推送）
 /task list
     查看定时任务（附一键试跑/暂停/恢复/删除按钮）
+/task platform 编号 <tg|dc|all>
+    设置定时任务仅推送单平台或恢复全平台推送
 /task run 编号
     立即试跑一次定时任务（不影响正常排期）
 /task pause 编号 / /task resume 编号
@@ -879,7 +881,11 @@ func (s *Service) withChatTasksContext(ctx context.Context, in platform.Inbound,
 		if t.Paused {
 			status = "已暂停"
 		}
-		fmt.Fprintf(&b, "#%d %s（指令：%s；状态：%s）\n", t.ID, t.Summary, t.Prompt, status)
+		pushScope := "全平台"
+		if t.TargetPlatform != "" {
+			pushScope = "仅 " + fullPlatformName(t.TargetPlatform)
+		}
+		fmt.Fprintf(&b, "#%d %s（指令：%s；推送：%s；状态：%s）\n", t.ID, t.Summary, t.Prompt, pushScope, status)
 	}
 	b.WriteString("[列表结束]\n\n")
 	b.WriteString(prompt)

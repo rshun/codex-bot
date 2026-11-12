@@ -97,6 +97,8 @@ func TestCommandTextSubcommands(t *testing.T) {
 		{sub("dir", "add", str("mode", "rw"), str("path", " /srv/a ")), "/dir add rw /srv/a"},
 		{sub("dir", "del", str("path", "/srv/a")), "/dir del /srv/a"},
 		{sub("task", "add", str("text", "每天九点看新闻")), "/task 每天九点看新闻"},
+		{sub("task", "add", str("text", "每天九点看新闻"), str("platform", "dc")), "/task -p dc 每天九点看新闻"},
+		{sub("task", "platform", &discordgo.ApplicationCommandInteractionDataOption{Name: "id", Type: discordgo.ApplicationCommandOptionInteger, Value: float64(2)}, str("target", "tg")), "/task platform 2 tg"},
 		{sub("task", "list"), "/task list"},
 		{sub("task", "del", &discordgo.ApplicationCommandInteractionDataOption{Name: "id", Type: discordgo.ApplicationCommandOptionInteger, Value: float64(3)}), "/task del 3"},
 	}

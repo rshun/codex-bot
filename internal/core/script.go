@@ -127,21 +127,26 @@ func scriptCommand(ctx context.Context, path string) (*exec.Cmd, error) {
 
 // scriptEnv is the process environment without bot secrets, plus task context for the script.
 func (s *Service) scriptEnv(t store.Task) []string {
-	out := make([]string, 0, len(os.Environ())+len(s.ScriptEnv)+5)
+	out := make([]string, 0, len(os.Environ())+len(s.ScriptEnv)+6)
 	for _, item := range os.Environ() {
 		name, _, _ := strings.Cut(item, "=")
-		if scriptSecretEnv[strings.ToUpper(name)] {
+		upper := strings.ToUpper(name)
+		if scriptSecretEnv[upper] || upper == "CODEX_BOT_TASK_ID" || upper == "GROK_BOT_TASK_ID" || upper == "CODEX_BOT_TASK_PLATFORM" {
 			continue
 		}
 		out = append(out, item)
 	}
 	out = append(out, s.ScriptEnv...)
-	return append(out,
+	out = append(out,
 		fmt.Sprintf("CODEX_BOT_TASK_ID=%d", t.ID),
 		fmt.Sprintf("GROK_BOT_TASK_ID=%d", t.ID),
 		"PYTHONIOENCODING=utf-8",
 		"PYTHONUNBUFFERED=1",
 	)
+	if t.TargetPlatform != "" {
+		out = append(out, "CODEX_BOT_TASK_PLATFORM="+t.TargetPlatform)
+	}
+	return out
 }
 
 // limitedBuffer keeps at most max bytes, dropping the oldest output first.

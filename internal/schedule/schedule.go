@@ -42,27 +42,29 @@ type Spec struct {
 // Parsed is Codex's structured answer to a scheduling request.
 type Parsed struct {
 	Spec
-	// Action is create (default), skip, pause, resume or delete.
-	Action  string `json:"action,omitempty"`
-	TaskID  int64  `json:"task_id,omitempty"`
-	Prompt  string `json:"prompt"`
-	Summary string `json:"summary"`
-	Error   string `json:"error,omitempty"`
+	// Action is create (default), skip, pause, resume, delete, run, update or none.
+	Action         string `json:"action,omitempty"`
+	TaskID         int64  `json:"task_id,omitempty"`
+	TargetPlatform string `json:"target_platform,omitempty"`
+	Prompt         string `json:"prompt"`
+	Summary        string `json:"summary"`
+	Error          string `json:"error,omitempty"`
 }
 
 // ExistingTask describes a task already scheduled in the chat so Codex can
 // match natural-language skip, pause, resume or delete requests without an ID.
 type ExistingTask struct {
-	ID      int64
-	Summary string
-	Prompt  string
-	NextRun time.Time
-	Paused  bool
+	ID             int64
+	Summary        string
+	Prompt         string
+	TargetPlatform string
+	NextRun        time.Time
+	Paused         bool
 }
 
 // Schema is passed to codex with --output-schema (OpenAI strict JSON Schema compatible).
 const Schema = `{"type":"object","additionalProperties":false,` +
-	`"required":["action","task_id","kind","at","time","times","weekdays","month_days","every_minutes","date_file","cron","prompt","summary","error"],` +
+	`"required":["action","task_id","kind","at","time","times","weekdays","month_days","every_minutes","date_file","cron","target_platform","prompt","summary","error"],` +
 	`"properties":{` +
 	`"action":{"type":"string","enum":["create","skip","pause","resume","delete","run","update","none"]},` +
 	`"task_id":{"type":"integer","description":"ID of the existing task when action is skip, pause, resume, delete, run or update; 0 otherwise"},` +
@@ -75,13 +77,24 @@ const Schema = `{"type":"object","additionalProperties":false,` +
 	`"every_minutes":{"type":"integer","description":"interval: repeat interval in minutes (>= 1); 0 otherwise"},` +
 	`"date_file":{"type":"string","description":"dates: absolute path to a file of YYYY-MM-DD or YYYYMMDD dates; empty string otherwise"},` +
 	`"cron":{"type":"string","description":"cron: standard 5-field cron expression (min hour dom month dow); empty string otherwise"},` +
+	`"target_platform":{"type":"string","enum":["","all","telegram","discord"],"description":"target delivery platform: \"telegram\" or \"discord\" when user asks to push only to one platform, \"all\" when explicitly requesting all/both platforms, or \"\" when not mentioned"},` +
 	`"prompt":{"type":"string","description":"instruction to execute when the task runs; empty string if not applicable"},` +
 	`"summary":{"type":"string","description":"short Chinese summary of the schedule and task; empty string if not applicable"},` +
 	`"error":{"type":"string","description":"short Chinese error message if the schedule is invalid or missing; empty string otherwise"}}}`
 
 // Prompt asks Codex to read text as a schedule or task management request relative to now.
 func Prompt(text string, now time.Time, loc *time.Location, tasks ...ExistingTask) string {
+	return PromptForPlatform("", text, now, loc, tasks...)
+}
+
+// PromptForPlatform is like Prompt and also includes the user's current chat platform so
+// relative phrases such as "只推当前平台" can be resolved accurately.
+func PromptForPlatform(currentPlatform, text string, now time.Time, loc *time.Location, tasks ...ExistingTask) string {
 	local := now.In(loc)
+	var platLine string
+	if p := strings.TrimSpace(currentPlatform); p != "" {
+		platLine = fmt.Sprintf("\nCurrent chat platform: %s.", p)
+	}
 	var taskBlock strings.Builder
 	if len(tasks) > 0 {
 		taskBlock.WriteString("\nExisting tasks in this chat:\n")
@@ -90,10 +103,14 @@ func Prompt(text string, now time.Time, loc *time.Location, tasks ...ExistingTas
 			if t.Paused {
 				status = "paused"
 			}
-			fmt.Fprintf(&taskBlock, "- #%d: %s (prompt: %s; %s)\n", t.ID, t.Summary, t.Prompt, status)
+			if t.TargetPlatform != "" {
+				fmt.Fprintf(&taskBlock, "- #%d: %s (prompt: %s; push: %s only; %s)\n", t.ID, t.Summary, t.Prompt, t.TargetPlatform, status)
+			} else {
+				fmt.Fprintf(&taskBlock, "- #%d: %s (prompt: %s; %s)\n", t.ID, t.Summary, t.Prompt, status)
+			}
 		}
 	}
-	return fmt.Sprintf(`Current local time: %s %s (%s, %s).%s
+	return fmt.Sprintf(`Current local time: %s %s (%s, %s).%s%s
 Turn the scheduling request below into JSON (fill unused string fields with "", unused array fields with [], and unused integer fields with 0).
 - To create a new scheduled task, set "action" to "create":
   - kind "once": set "at" to the local time as YYYY-MM-DD HH:MM.
@@ -103,11 +120,12 @@ Turn the scheduling request below into JSON (fill unused string fields with "", 
   - kind "interval": set "every_minutes".
   - kind "dates": when the request says to run according to dates in a file, set "date_file" to the file path and "time" to HH:MM (or "times" if multiple times per day; default "09:00" if no time of day is specified).
   - kind "cron": when the user provides a 5-field cron expression or a recurring schedule where all hours share the same minute pattern (e.g. "每小时整点", "工作日9点到15点每小时"), set "cron" to a standard 5-field cron expression "min hour dom month dow".
-  - "prompt": what Codex should do each time the task runs, as an instruction in the user's language, without the schedule.
+  - "target_platform": leave "" by default (pushes to all configured platforms). Set to "telegram" (TG) or "discord" (DC) ONLY if the user asks to push to a single platform (e.g. "只推TG", "仅发Discord", "不要发Discord", or "只推当前平台"/"只发这里" resolved from Current chat platform); set to "all" if explicitly requesting all/both platforms.
+  - "prompt": what Codex should do each time the task runs, as an instruction in the user's language, without the schedule or platform routing instruction.
   - "summary": one short Chinese line such as "每天 09:00：总结科技新闻" or "每天 06:01/11:02/16:03：发送测试消息".
 - To manage an existing task in natural language:
   - "action" = "run": immediately run/test an existing task once right now without changing its schedule (e.g. "现在试跑一下定时任务", "请试运行一下任务2", "运行一下#2", "马上执行一次任务1", "跑一下抽单词那个任务").
-  - "action" = "update": change an existing task's schedule/time (e.g. "把定时任务改到每天 10:00", "把任务2改成每个工作日 09:30"); fill the new schedule fields ("kind", "at"/"time"/"times"/"weekdays"/"every_minutes"/"date_file") and set "summary" to reflect the new schedule ("prompt" may be "" if unchanged).
+  - "action" = "update": change an existing task's schedule/time, prompt, and/or target platform (e.g. "把定时任务改到每天 10:00", "把任务2改成每个工作日 09:30", "把任务1改成只推送TG", "把任务1改成全平台推送"); fill the new schedule fields ("kind", "at"/"time"/"times"/"weekdays"/"month_days"/"every_minutes"/"date_file"/"cron") and set "summary" when changing the schedule, or leave "kind" as "" when ONLY changing "target_platform" or "prompt" ("target_platform" = "telegram" / "discord" / "all", or "" if unchanged).
   - "action" = "skip": cancel/skip only the next run (e.g. "取消明天的定时任务", "明天不用执行了", "跳过下次"), keeping future runs.
   - "action" = "pause": pause an active task until resumed (e.g. "暂停定时任务", "先停一下任务2").
   - "action" = "resume": resume a paused task (e.g. "恢复定时任务", "恢复任务2").
@@ -116,7 +134,7 @@ Turn the scheduling request below into JSON (fill unused string fields with "", 
 - If the message is an ordinary chat question or conversation rather than creating/running/modifying/deleting a scheduled task, set "action" to "none".
 - If the user clearly intends to create or update a scheduled task but gives an invalid or missing time, set "error" to "<short reason in Chinese>".
 
-Request: %s`, local.Format(atLayout), local.Weekday(), local.Format("MST"), loc.String(), taskBlock.String(), text)
+Request: %s`, local.Format(atLayout), local.Weekday(), local.Format("MST"), loc.String(), platLine, taskBlock.String(), text)
 }
 
 // Decode reads the structured output, falling back to JSON in the reply text.
@@ -131,6 +149,7 @@ func Decode(structured json.RawMessage, text string) (Parsed, error) {
 	}
 	p.DateFile = strings.TrimSpace(p.DateFile)
 	p.Cron = strings.TrimSpace(p.Cron)
+	p.TargetPlatform = normalizeTargetPlatform(p.TargetPlatform)
 	p.normalizeTimes()
 	if p.DateFile != "" {
 		p.Kind = "dates"
@@ -141,6 +160,19 @@ func Decode(structured json.RawMessage, text string) (Parsed, error) {
 		p.Time = "09:00"
 	}
 	return p, nil
+}
+
+func normalizeTargetPlatform(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "telegram", "tg":
+		return "telegram"
+	case "discord", "dc":
+		return "discord"
+	case "all", "both", "全平台", "双端", "双平台", "全部":
+		return "all"
+	default:
+		return ""
+	}
 }
 
 func (s *Spec) normalizeTimes() {

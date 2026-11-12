@@ -299,6 +299,17 @@ func TestGlobalMemoriesAndDeleteTaskByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gotTask, ok, err := s.TaskByID(ctx, tid)
+	if err != nil || !ok || gotTask.TargetPlatform != "" {
+		t.Fatalf("default TargetPlatform: %#v ok=%v err=%v", gotTask, ok, err)
+	}
+	if ok, err := s.SetTaskTargetPlatform(ctx, tid, "discord"); err != nil || !ok {
+		t.Fatalf("SetTaskTargetPlatform: ok=%v err=%v", ok, err)
+	}
+	gotTask, ok, err = s.TaskByID(ctx, tid)
+	if err != nil || !ok || gotTask.TargetPlatform != "discord" {
+		t.Fatalf("updated TargetPlatform: %#v ok=%v err=%v", gotTask, ok, err)
+	}
 	if ok, err := s.DeleteTaskByID(ctx, tid); err != nil || !ok {
 		t.Fatalf("DeleteTaskByID: %v %v", ok, err)
 	}

@@ -156,3 +156,38 @@ func TestScriptTaskRejectsPathOutsideScriptDirs(t *testing.T) {
 		t.Fatalf("task created: %#v", all)
 	}
 }
+
+func TestScriptTaskSinglePlatformEnvAndFailureRouting(t *testing.T) {
+	requirePython(t)
+	svc, _, tgSent := taskService(t, dailyNews)
+	dcRec := &recorder{}
+	svc.AllowedUsers["discord"] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders["discord"] = &fakeDiscordSender{rec: dcRec}
+
+	dir := t.TempDir()
+	svc.ScriptDirs = []string{dir}
+	svc.ScriptLogDir = filepath.Join(t.TempDir(), "task-logs")
+	failScript := writeScript(t, dir, "plat_fail.py", "import os\nprint('plat=' + str(os.environ.get('CODEX_BOT_TASK_PLATFORM')))\nraise SystemExit(2)\n")
+
+	rec := &recorder{}
+	say(svc, rec, "/task script -p tg 0 9 * * * "+failScript+" 仅推TG脚本")
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "（仅推送 Telegram）") {
+		t.Fatalf("expected TG-only note: %#v", got)
+	}
+
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	alert := tgSent.wait(t, 1)
+	if !strings.Contains(alert[0], "plat=telegram") {
+		t.Fatalf("expected CODEX_BOT_TASK_PLATFORM=telegram in script env, got: %#v", alert)
+	}
+	dcRec.mu.Lock()
+	dcCount := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if dcCount != 0 {
+		t.Fatalf("expected 0 Discord failure alerts for TG-only script task, got %d", dcCount)
+	}
+}

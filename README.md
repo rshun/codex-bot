@@ -28,7 +28,7 @@ A self-hosted **Telegram & Discord private AI assistant** powered by your local 
 
 - **零 API 账单**：直接复用服务器本机 `codex login` 订阅态，无需配置付费 LLM、语音或图床 API Key。
 - **双平台独立对话 + 一键跨端接力**：普通对话上下文按平台各自独立（在 Telegram 提问就在 Telegram 回复，在 Discord 提问就在 Discord 回复），同时支持通过 `/sessions` 或内联按钮**在 TG 与 Discord 之间一键接力同一段上下文**。
-- **双端自动共享记忆与任务**：长期记忆（`/memory`）与定时任务（`/task`）在 Telegram 与 Discord 之间实时同步共享；定时任务触发时自动双端同时推送。
+- **双端自动共享记忆与任务**：长期记忆（`/memory`）与定时任务（`/task`）在 Telegram 与 Discord 之间实时同步共享；定时任务未指定平台时默认双端同时推送，也支持按任务指定仅推送 Telegram 或仅推送 Discord。
 - **双维度额度与用量可观测**：提供 `/quota`（通过 `codex app-server` JSON-RPC 实时读取账号 5 小时及周窗口剩余额度）与 `/usage`（结合账号配额与最近一轮 CLI Token 消耗快照 `input` / `cached_input` / `output`）。
 - **多模态开箱即用**：支持多图识别（含 Telegram 相册合并）、联网安全找图、单词/多语种标准 `.mp3` 发音条、外链防 SSRF 正文预抓取（GitHub / X / 网页）、服务器文件安全下发与表情回应。
 - **系统级定时调度 + 零额度脚本任务**：自动对接 Linux `crontab`、macOS `launchd`、Windows 任务计划程序；支持将固定业务脚本（`.py` / `.sh` / 可执行程序）绑定为 `/task script`，到点直接运行脚本，不调 Codex、不耗额度，失败自动双端告警。
@@ -153,7 +153,7 @@ sudo systemctl enable --now codex-bot
 | `/usage` | 查询当前订阅周期剩余额度及最近一轮 CLI Token 用量明细 |
 | `/quota` | 实时查询 ChatGPT/Codex 账号窗口剩余配额百分比与重置时间 |
 | `/memory` | 查看跨平台共享长期记忆；支持 `add <内容>`、`del <编号>`、`clear`，或直接说「长期记忆：…」 |
-| `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`cron`、`script`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
+| `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`-p tg\|dc`、`cron`、`script`、`platform`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
 | `/mcp` | 管理 MCP 服务：`/mcp` 列表、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
 | `/dir` | 查看可写目录白名单；`/dir add rw /绝对路径` 授权写入；`/dir del /绝对路径` 收回权限（或直接说「允许写入 /srv/out」） |
 | `/shell` | 查看或切换命令执行权限（`/shell on` / `/shell off`，或直接说「开启命令执行」「关闭命令执行」） |
@@ -195,17 +195,23 @@ sudo systemctl enable --now codex-bot
   - **Linux / Unix**：托管写入当前用户的 `crontab`（`# BEGIN CODEX-BOT TASKS` ... `# END CODEX-BOT TASKS`）。
   - **macOS**：写入 `~/Library/LaunchAgents/com.codexbot.task.<编号>.plist` 并通过 `launchctl` 加载。
   - **Windows**：注册至系统任务计划程序（`\CodexBot\Task_<编号>`）。
-- 每次触发均使用独立会话，不污染日常聊天上下文，结果以 `⏰ 定时任务 #编号` 双端推送到 Telegram 与 Discord。
+- 每次触发均使用独立会话，不污染日常聊天上下文，结果以 `⏰ 定时任务 #编号` 推送：
+  - **默认全平台推送**：未指定平台时同时推送到已配置的 Telegram 与 Discord。
+  - **指定单平台推送**：创建时可直接在自然语言中说明（如「`/task 每天早上 8:30 汇总今日科技要闻，只推 TG`」「`仅发 Discord`」「`只推当前平台`」），或使用 `-p tg` / `-p dc` 参数（如 `/task -p tg ...`、`/task cron -p dc ...`）；已有任务可随时通过 `/task platform <编号> <tg|dc|all>`（或自然语言「把任务 1 改成只推 TG / 全平台推送」）切换。
 
 ##### 本机脚本任务（`/task script` / `/task bind`）
 对于逻辑固定或耗时的自动化任务（如定时下单、数据采集、日报生成），可直接绑定本机脚本执行，**不调用 Codex、不占会话、零额度消耗**：
 
 ```text
-# 新建脚本任务：5 段 Cron + 脚本绝对路径（不得含空格）+ 可选任务说明
+# 新建脚本任务：可选 -p tg|dc + 5 段 Cron + 脚本绝对路径（不得含空格）+ 可选任务说明
 /task script 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py 工作日早餐自动下单
+/task script -p tg 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py 仅推 TG 的早餐下单
 
-# 将已有的 #3 定时任务切换为运行本机脚本（执行时间保持不变）
+# 将已有的 #3 定时任务切换为运行本机脚本（执行时间与推送平台保持不变）
 /task bind 3 /home/codex/bin/auto_breakfast.py
+
+# 修改已有任务的推送平台（tg / dc / all）
+/task platform 3 tg
 
 # 解绑脚本，恢复为普通 Codex 提示词任务
 /task unbind 3
@@ -213,8 +219,8 @@ sudo systemctl enable --now codex-bot
 
 - **执行规则**：`.py` 使用 `python3`（Windows 优先 `python`），`.sh` 使用 `/bin/sh`，其余文件需具备可执行权限；工作目录为脚本所在目录，超时上限为 `SCRIPT_TIMEOUT`（默认 `30m`）。
 - **目录白名单与防篡改**：仅允许绑定 `SCRIPT_DIRS`（默认 `~/bin`）目录下的脚本；校验软链接真实路径，拒绝全局可写（world-writable）文件；仅认用户本人显式发送的 `/task script` 或 `/task bind` 命令，Codex 自然语言解析无权绑定或替换脚本。
-- **静默成功与失败告警**：退出码为 `0` 时机器人不额外发消息（由脚本按需调用 `"$CODEX_BOT_BIN" send` 主动推送）；退出码非 `0` 或超时时，机器人自动截取末尾输出双端推送告警。完整日志保存在 `<DATA_DIR>/task-logs/task-<编号>.log`（满 2MB 自动轮转）。
-- **无密钥注入环境**：脚本运行环境自动剥离 Bot Token 与用户白名单，并注入 `CODEX_BOT_BIN`、`BOT_ENV_FILE`、`DATA_DIR`、`CODEX_BOT_TASK_ID`。
+- **静默成功与失败告警**：退出码为 `0` 时机器人不额外发消息（由脚本按需调用 `"$CODEX_BOT_BIN" send` 主动推送）；退出码非 `0` 或超时时，机器人自动截取末尾输出按任务目标平台推送告警。完整日志保存在 `<DATA_DIR>/task-logs/task-<编号>.log`（满 2MB 自动轮转）。
+- **无密钥注入环境**：脚本运行环境自动剥离 Bot Token 与用户白名单，并注入 `CODEX_BOT_BIN`、`BOT_ENV_FILE`、`DATA_DIR`、`CODEX_BOT_TASK_ID`（若任务指定了单平台还会注入 `CODEX_BOT_TASK_PLATFORM`，脚本内直接调用 `codex-bot send` 未传 `-p` 时会自动跟随该单平台推送）。
 
 #### 5. 本机命令行主动推送 (`codex-bot send`)
 
@@ -313,7 +319,7 @@ go test -mod=readonly ./...
 
 - **Zero API Token Billing**: Runs directly on top of an authenticated local `codex` CLI subscription (`codex login`). No pay-per-token LLM, TTS, or image-hosting API keys needed.
 - **Per-Platform Contexts + One-Click Cross-Platform Handoff**: Regular conversations stay independent on Telegram and Discord by default, while `/sessions` (and interactive inline buttons) let you **hand off and continue any conversation seamlessly between Telegram and Discord**.
-- **Shared Long-Term Memory & Dual-Platform Tasks**: Long-term memories (`/memory`) and scheduled tasks (`/task`) are automatically shared across Telegram and Discord, with scheduled task results delivered to both platforms simultaneously.
+- **Shared Long-Term Memory & Flexible Task Delivery**: Long-term memories (`/memory`) and scheduled tasks (`/task`) are automatically shared across Telegram and Discord; scheduled tasks push to all configured platforms by default, or can target a single platform (`Telegram` or `Discord`) per task.
 - **Dual Quota & Token Observability**: Check live account rate-limit windows via `/quota` (`codex app-server` JSON-RPC) and inspect both account quota and the latest turn's token breakdown (`input`, `cached_input`, `output`) via `/usage`.
 - **Rich Multimodal Capabilities**: Multi-image vision (including Telegram album merging), SSRF-safe web image fetching, IPA + inline `.mp3` pronunciation audio bars, SSRF-safe link prefetching (GitHub, X/Twitter, articles), local file delivery, and contextual emoji reactions.
 - **OS-Native Task Scheduler + Zero-Quota Script Tasks**: Synchronizes tasks natively with Linux `crontab`, macOS `launchd`, and Windows Task Scheduler. Bind deterministic jobs (`.py`, `.sh`, or binaries) via `/task script` to run directly without invoking Codex or consuming quota — silent on success, automatic dual-platform alerts on failure.
@@ -438,7 +444,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 | `/usage` | Check remaining Codex subscription quota and latest turn CLI token usage |
 | `/quota` | Query live ChatGPT/Codex rate-limit windows and reset times via `codex app-server` |
 | `/memory` | View shared long-term memories; supports `add <text>`, `del <id>`, `clear`, or natural language |
-| `/task` | Manage scheduled & script tasks (`<natural language>`, `cron`, `script`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
+| `/task` | Manage scheduled & script tasks (`<natural language>`, `-p tg\|dc`, `cron`, `script`, `platform`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
 | `/mcp` | Manage MCP servers: `/mcp` list, `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
 | `/dir` | View writable directories; `/dir add rw /abs/path` to grant write access; `/dir del /abs/path` to revoke |
 | `/shell` | View or toggle server command execution (`/shell on` / `/shell off`) |
@@ -479,7 +485,7 @@ Create tasks in natural language (e.g., `/task Summarize top tech news every wee
   - **Linux / Unix**: Managed block inside the service user's `crontab` (`# BEGIN CODEX-BOT TASKS` ... `# END CODEX-BOT TASKS`).
   - **macOS**: `~/Library/LaunchAgents/com.codexbot.task.<id>.plist` via `launchctl`.
   - **Windows**: Windows Task Scheduler under `\CodexBot\Task_<id>`.
-- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to both Telegram and Discord.
+- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to all configured platforms by default — or to a single platform when specified in natural language (e.g., `"only push to TG"`), via `-p tg` / `-p dc` on `/task` / `/task cron` / `/task script`, or toggled anytime via `/task platform <id> <tg|dc|all>`.
 
 ##### Local Script Tasks (`/task script` / `/task bind`)
 Offload deterministic or long-running jobs (e.g., automated ordering, scrapers, ETL reports) to local scripts while managing their schedule from chat — **zero Codex invocations and zero quota usage**:
