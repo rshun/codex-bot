@@ -200,9 +200,39 @@ func (b *Bot) registerCommands() error {
 					Description: "用一句话创建定时任务",
 					Options: []*discordgo.ApplicationCommandOption{
 						{Type: discordgo.ApplicationCommandOptionString, Name: "text", Description: "例如：每天早上九点总结科技新闻", Required: true},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "platform",
+							Description: "推送平台（不选则默认全平台推送）",
+							Required:    false,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "全平台（默认）", Value: "all"},
+								{Name: "仅 Telegram", Value: "tg"},
+								{Name: "仅 Discord", Value: "dc"},
+							},
+						},
 					},
 				},
 				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看定时任务"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "platform",
+					Description: "设置定时任务仅推送单个平台或全平台推送",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "任务编号", Required: true},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "target",
+							Description: "推送范围",
+							Required:    true,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "全平台", Value: "all"},
+								{Name: "仅 Telegram", Value: "tg"},
+								{Name: "仅 Discord", Value: "dc"},
+							},
+						},
+					},
+				},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "run",
@@ -517,7 +547,12 @@ func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 	case data.Name == "mcp" && (sub.Name == "enable" || sub.Name == "disable"):
 		return base + " " + sub.Name + " " + values["name"]
 	case data.Name == "task" && sub.Name == "add":
+		if values["platform"] != "" {
+			return base + " -p " + values["platform"] + " " + values["text"]
+		}
 		return base + " " + values["text"]
+	case data.Name == "task" && sub.Name == "platform":
+		return base + " platform " + values["id"] + " " + values["target"]
 	case data.Name == "task" && (sub.Name == "run" || sub.Name == "pause" || sub.Name == "resume" || sub.Name == "skip"):
 		return base + " " + sub.Name + " " + values["id"]
 	case data.Name == "memory" && sub.Name == "add":

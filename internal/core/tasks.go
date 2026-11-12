@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/rshun/codex-bot/internal/actions"
 	"github.com/rshun/codex-bot/internal/codex"
@@ -23,20 +24,22 @@ import (
 
 const taskUsage = `用法：
 /task 每天早上九点总结科技新闻
-    用一句话创建定时任务（支持每天/每周/每月/月末最后一天/工作日）
-/task cron 30 9 1 * * 汇总上月账单
+    用一句话创建定时任务（默认全平台推送；可说「只推TG」「只推Discord」或加 -p tg / -p dc 仅推单平台）
+/task cron [-p tg|dc] 30 9 1 * * 汇总上月账单
     直接用标准 5 段 Cron 表达式创建定时任务
-/task 取消明天的定时任务 / 暂停定时任务 / 恢复定时任务
-    用自然语言跳过下次、暂停、恢复或删除定时任务
+/task 取消明天的定时任务 / 暂停定时任务 / 把任务1改成只推TG
+    用自然语言跳过下次、暂停、恢复、删除、改时间或切换推送平台
 /task list
     查看定时任务
 /task run 编号
     立即试跑一次定时任务
+/task platform 编号 <tg|dc|all>
+    设置任务仅推送单平台（tg / dc）或恢复全平台推送（all）
 /task pause 编号 / /task resume 编号 / /task skip 编号
     暂停、恢复或跳过下次定时任务
 /task del 编号
     删除定时任务
-/task script 59 7 * * 1-5 /home/codex/bin/job.py 工作日早餐下单
+/task script [-p tg|dc] 59 7 * * 1-5 /home/codex/bin/job.py 工作日早餐下单
     创建脚本任务：到点直接运行本机脚本（不调用 Codex、不占会话），脚本须放在 SCRIPT_DIRS 目录内
 /task bind 编号 /home/codex/bin/job.py
     把已有定时任务改为运行脚本（保留原时间）；/task unbind 编号 恢复为 Codex 指令任务`
@@ -77,18 +80,34 @@ func (s *Service) minInterval() time.Duration {
 }
 
 func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out platform.Replier, arg string, onTool func(codex.ToolUse)) (string, []actions.File, [][]platform.Button, error) {
-	fields := strings.Fields(arg)
+	targetPlat, hasPlatFlag, cleanArg, flagErr := trimLeadingPlatformFlag(arg)
+	if flagErr != "" {
+		return flagErr, nil, nil, nil
+	}
+	fields := strings.Fields(cleanArg)
+	if !hasPlatFlag && len(fields) > 1 && (fields[0] == "cron" || fields[0] == "script") {
+		_, afterSub, _ := cutFirstField(cleanArg)
+		subPlat, subHas, subRest, subErr := trimLeadingPlatformFlag(afterSub)
+		if subErr != "" {
+			return subErr, nil, nil, nil
+		}
+		if subHas {
+			targetPlat = subPlat
+			hasPlatFlag = true
+			fields = append([]string{fields[0]}, strings.Fields(subRest)...)
+		}
+	}
 	switch {
 	case len(fields) == 0:
 		return taskUsage, nil, nil, nil
-	case len(fields) == 1 && fields[0] == "list":
+	case !hasPlatFlag && len(fields) == 1 && fields[0] == "list":
 		reply, btns, err := s.taskList(ctx, in)
 		return reply, nil, btns, err
-	case (fields[0] == "run" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 2:
+	case !hasPlatFlag && (fields[0] == "run" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 2:
 		action := fields[0]
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, cleanArg, "", false, onTool)
 			return reply, files, nil, createErr
 		}
 		existing, err := s.Store.AllTasks(ctx)
@@ -97,10 +116,10 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		}
 		reply, files, manageErr := s.taskManage(ctx, in, out, existing, schedule.Parsed{Action: action, TaskID: id}, s.now(), onTool)
 		return reply, files, nil, manageErr
-	case fields[0] == "del" && len(fields) == 2:
+	case !hasPlatFlag && fields[0] == "del" && len(fields) == 2:
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, cleanArg, "", false, onTool)
 			return reply, files, nil, createErr
 		}
 		removed, err := s.Store.DeleteTaskByID(ctx, id)
@@ -112,28 +131,37 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		}
 		warn := s.syncScheduler(ctx)
 		return fmt.Sprintf("已删除 #%d。", id) + warn, nil, nil, nil
-	case (fields[0] == "del" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 1:
+	case !hasPlatFlag && (fields[0] == "del" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 1:
 		return taskUsage, nil, nil, nil
+	case !hasPlatFlag && (fields[0] == "platform" || fields[0] == "target") && (len(fields) == 2 || len(fields) == 3):
+		rawTarget := ""
+		if len(fields) == 3 {
+			rawTarget = fields[2]
+		}
+		reply, err := s.taskSetPlatform(ctx, fields[1], rawTarget)
+		return reply, nil, nil, err
+	case !hasPlatFlag && (fields[0] == "platform" || fields[0] == "target"):
+		return "用法：`/task platform <编号> <tg|dc|all>`（例如：`/task platform 1 tg` 仅推 Telegram，`/task platform 1 all` 恢复全平台推送）", nil, nil, nil
 	case fields[0] == "cron" && len(fields) >= 7:
-		reply, err := s.taskCreateRawCron(ctx, in, fields[1:6], strings.Join(fields[6:], " "))
+		reply, err := s.taskCreateRawCron(ctx, in, fields[1:6], strings.Join(fields[6:], " "), targetPlat)
 		return reply, nil, nil, err
 	case fields[0] == "cron":
-		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil, nil
+		return "用法：`/task cron [-p tg|dc] <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil, nil
 	case fields[0] == "script" && len(fields) >= 7:
-		reply, err := s.taskCreateScript(ctx, in, fields[1:6], fields[6], strings.Join(fields[7:], " "))
+		reply, err := s.taskCreateScript(ctx, in, fields[1:6], fields[6], strings.Join(fields[7:], " "), targetPlat)
 		return reply, nil, nil, err
 	case fields[0] == "script":
-		return "用法：`/task script <分> <时> <日> <月> <周> <脚本绝对路径> [说明]`（例如：`/task script 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py 工作日早餐下单`）", nil, nil, nil
-	case fields[0] == "bind" && len(fields) == 3:
+		return "用法：`/task script [-p tg|dc] <分> <时> <日> <月> <周> <脚本绝对路径> [说明]`（例如：`/task script 59 7 * * 1-5 /home/codex/bin/auto_breakfast.py 工作日早餐下单`）", nil, nil, nil
+	case !hasPlatFlag && fields[0] == "bind" && len(fields) == 3:
 		reply, err := s.taskBindScript(ctx, fields[1], fields[2])
 		return reply, nil, nil, err
-	case fields[0] == "unbind" && len(fields) == 2:
+	case !hasPlatFlag && fields[0] == "unbind" && len(fields) == 2:
 		reply, err := s.taskBindScript(ctx, fields[1], "")
 		return reply, nil, nil, err
-	case fields[0] == "bind" || fields[0] == "unbind":
+	case !hasPlatFlag && (fields[0] == "bind" || fields[0] == "unbind"):
 		return "用法：`/task bind <编号> <脚本绝对路径>` 或 `/task unbind <编号>`", nil, nil, nil
 	default:
-		reply, files, err := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+		reply, files, err := s.taskCreateWithProgress(ctx, in, out, cleanArg, targetPlat, hasPlatFlag, onTool)
 		if errors.Is(err, errNotTask) {
 			return notUnderstood, nil, nil, nil
 		}
@@ -150,11 +178,14 @@ func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, [][
 		return "当前没有定时任务。", nil, nil
 	}
 	var b strings.Builder
-	b.WriteString("定时任务（TG / Discord 同步共享并同时推送）：\n")
+	b.WriteString("定时任务（默认全平台推送，可按任务指定单平台）：\n")
 	for _, t := range tasks {
 		mark := ""
 		if t.Script != "" {
-			mark = " 📜"
+			mark += " 📜"
+		}
+		if t.TargetPlatform != "" {
+			mark += fmt.Sprintf(" [仅 %s]", shortPlatformName(t.TargetPlatform))
 		}
 		if t.Paused {
 			fmt.Fprintf(&b, "#%d%s %s（已暂停）\n", t.ID, mark, t.Summary)
@@ -165,7 +196,7 @@ func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, [][
 	return strings.TrimSpace(b.String()), taskListButtons(tasks), nil
 }
 
-func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, text string, onTool func(codex.ToolUse)) (string, []actions.File, error) {
+func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, text, forcedPlat string, hasForcedPlat bool, onTool func(codex.ToolUse)) (string, []actions.File, error) {
 	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", nil, err
@@ -185,11 +216,12 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 	existingSpecs := make([]schedule.ExistingTask, len(existing))
 	for i, t := range existing {
 		existingSpecs[i] = schedule.ExistingTask{
-			ID:      t.ID,
-			Summary: t.Summary,
-			Prompt:  t.Prompt,
-			NextRun: t.NextRun,
-			Paused:  t.Paused,
+			ID:             t.ID,
+			Summary:        t.Summary,
+			Prompt:         t.Prompt,
+			TargetPlatform: t.TargetPlatform,
+			NextRun:        t.NextRun,
+			Paused:         t.Paused,
 		}
 	}
 	// Parsing runs in a throwaway session so it never touches the chat's context.
@@ -197,7 +229,7 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 		SessionID:  sessionID,
 		NewSession: true,
 		Model:      chat.Model,
-		Prompt:     schedule.Prompt(text, now, s.location(), existingSpecs...),
+		Prompt:     schedule.PromptForPlatform(in.Platform, text, now, s.location(), existingSpecs...),
 		JSONSchema: schedule.Schema,
 	})
 	if err != nil {
@@ -213,6 +245,13 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 	}
 	if parsed.Error != "" {
 		return notUnderstood + "（" + parsed.Error + "）", nil, nil
+	}
+	if hasForcedPlat {
+		if forcedPlat == "" {
+			parsed.TargetPlatform = "all"
+		} else {
+			parsed.TargetPlatform = forcedPlat
+		}
 	}
 	switch parsed.Action {
 	case "skip", "pause", "resume", "delete", "run", "update":
@@ -231,6 +270,10 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 	if !ok {
 		return notUnderstood + "（这个时间已经过去了）", nil, nil
 	}
+	targetPlat := resolveParsedTargetPlatform(parsed.TargetPlatform, "")
+	if msg := s.checkTargetPlatform(targetPlat); msg != "" {
+		return msg, nil, nil
+	}
 	spec, err := json.Marshal(parsed.Spec)
 	if err != nil {
 		return "", nil, err
@@ -240,19 +283,20 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 		summary = parsed.Prompt
 	}
 	id, err := s.Store.AddTask(ctx, store.Task{
-		Platform: in.Platform,
-		ChatID:   in.ChatID,
-		UserID:   in.UserID,
-		Spec:     string(spec),
-		Prompt:   parsed.Prompt,
-		Summary:  summary,
-		NextRun:  next,
+		Platform:       in.Platform,
+		ChatID:         in.ChatID,
+		UserID:         in.UserID,
+		Spec:           string(spec),
+		Prompt:         parsed.Prompt,
+		Summary:        summary,
+		NextRun:        next,
+		TargetPlatform: targetPlat,
 	})
 	if err != nil {
 		return "", nil, err
 	}
 	warn := s.syncScheduler(ctx)
-	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
+	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。%s", id, summary, next.In(s.location()).Format("01-02 15:04"), formatPlatformSuffix(targetPlat)) + warn, nil, nil
 }
 
 func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platform.Replier, existing []store.Task, parsed schedule.Parsed, now time.Time, onTool func(codex.ToolUse)) (string, []actions.File, error) {
@@ -281,6 +325,22 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		if target.Script != "" {
 			return s.startScriptTrial(*target), nil, nil
 		}
+		if target.TargetPlatform != "" && target.TargetPlatform != in.Platform {
+			primary, ok := s.primaryTaskTarget(ctx, *target)
+			if !ok {
+				return fmt.Sprintf("⚠️ 无法推送到 %s（未配置对应机器人或未找到接收会话）。", fullPlatformName(target.TargetPlatform)), nil, nil
+			}
+			runIn := platform.Inbound{
+				Platform:    primary.Platform,
+				ChatID:      primary.ChatID,
+				UserID:      target.UserID,
+				Text:        target.Prompt,
+				TextMessage: true,
+			}
+			reply, files := s.runTask(ctx, runIn, primary.Sender, *target)
+			s.deliverTask(ctx, *target, primary.Platform, primary.ChatID, primary.Sender, reply, files)
+			return fmt.Sprintf("已试跑 #%d（%s），结果已仅推送至 %s。", target.ID, target.Summary, fullPlatformName(target.TargetPlatform)), nil, nil
+		}
 		runIn := platform.Inbound{
 			Platform:    in.Platform,
 			ChatID:      in.ChatID,
@@ -293,16 +353,37 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		s.mirrorTaskToPeers(ctx, *target, in.Platform, reply, files)
 		return reply, files, nil
 	case "update":
-		if err := parsed.Validate(now, s.location(), s.minInterval()); err != nil {
-			return notUnderstood + "（" + err.Error() + "）", nil, nil
+		newTargetPlat := resolveParsedTargetPlatform(parsed.TargetPlatform, target.TargetPlatform)
+		if msg := s.checkTargetPlatform(newTargetPlat); msg != "" {
+			return msg, nil, nil
 		}
-		next, ok := parsed.Next(now, s.location())
-		if !ok {
-			return notUnderstood + "（这个时间已经过去了）", nil, nil
+		if parsed.Kind == "" && parsed.TargetPlatform != "" && strings.TrimSpace(parsed.Prompt) == "" {
+			if _, err := s.Store.SetTaskTargetPlatform(ctx, target.ID, newTargetPlat); err != nil {
+				return "", nil, err
+			}
+			if newTargetPlat == "" {
+				return fmt.Sprintf("已设置 #%d（%s）为全平台推送。", target.ID, target.Summary), nil, nil
+			}
+			return fmt.Sprintf("已设置 #%d（%s）仅推送 %s。", target.ID, target.Summary, fullPlatformName(newTargetPlat)), nil, nil
 		}
-		spec, err := json.Marshal(parsed.Spec)
-		if err != nil {
-			return "", nil, err
+		specStr := target.Spec
+		next := target.NextRun
+		if parsed.Kind != "" {
+			if err := parsed.Validate(now, s.location(), s.minInterval()); err != nil {
+				return notUnderstood + "（" + err.Error() + "）", nil, nil
+			}
+			var ok bool
+			next, ok = parsed.Next(now, s.location())
+			if !ok {
+				return notUnderstood + "（这个时间已经过去了）", nil, nil
+			}
+			specBytes, err := json.Marshal(parsed.Spec)
+			if err != nil {
+				return "", nil, err
+			}
+			specStr = string(specBytes)
+		} else if strings.TrimSpace(parsed.Prompt) == "" {
+			return notUnderstood + "（不支持这种时间规则）", nil, nil
 		}
 		prompt := strings.TrimSpace(parsed.Prompt)
 		if prompt == "" {
@@ -312,11 +393,16 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		if summary == "" {
 			summary = target.Summary
 		}
-		if err := s.Store.UpdateTask(ctx, target.ID, string(spec), prompt, summary, next); err != nil {
+		if err := s.Store.UpdateTask(ctx, target.ID, specStr, prompt, summary, next); err != nil {
 			return "", nil, err
 		}
+		if newTargetPlat != target.TargetPlatform {
+			if _, err := s.Store.SetTaskTargetPlatform(ctx, target.ID, newTargetPlat); err != nil {
+				return "", nil, err
+			}
+		}
 		warn := s.syncScheduler(ctx)
-		return fmt.Sprintf("已更新 #%d：%s。下次执行：%s。", target.ID, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
+		return fmt.Sprintf("已更新 #%d：%s。下次执行：%s。%s", target.ID, summary, next.In(s.location()).Format("01-02 15:04"), formatPlatformSuffix(newTargetPlat)) + warn, nil, nil
 	case "delete":
 		if _, err := s.Store.DeleteTaskByID(ctx, target.ID); err != nil {
 			return "", nil, err
@@ -374,6 +460,7 @@ func looksLikeTaskManage(text string) bool {
 		"马上运行", "立即运行", "立刻运行", "现在运行",
 		"执行", "运行", "跑一下", "跑一次", "测试",
 		"改到", "改成", "改为", "修改", "调整", "推迟", "提前",
+		"只推", "仅推", "只发", "仅发", "全平台", "双端", "双平台",
 		"pause", "resume", "skip", "cancel", "del", "run",
 	} {
 		if strings.Contains(lower, kw) {
@@ -401,7 +488,7 @@ func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out p
 	if !looksLikeNaturalTask(text, existing) {
 		return "", nil, nil, false, nil
 	}
-	reply, files, err := s.taskCreateWithProgress(ctx, in, out, text, onTool)
+	reply, files, err := s.taskCreateWithProgress(ctx, in, out, text, "", false, onTool)
 	if errors.Is(err, errNotTask) {
 		return "", nil, nil, false, nil
 	}
@@ -754,16 +841,16 @@ func taskNext(t store.Task, now time.Time, loc *time.Location) (time.Time, bool)
 	return spec.Next(now, loc)
 }
 
-func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt string) (string, error) {
+func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt, targetPlat string) (string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`", nil
+		return "用法：`/task cron [-p tg|dc] <分> <时> <日> <月> <周> <指令内容>`", nil
 	}
-	return s.taskCreateCron(ctx, in, cronFields, prompt, "")
+	return s.taskCreateCron(ctx, in, cronFields, prompt, "", targetPlat)
 }
 
 // taskCreateScript creates a cron task that runs a local script instead of a Codex prompt.
-func (s *Service) taskCreateScript(ctx context.Context, in platform.Inbound, cronFields []string, rawPath, desc string) (string, error) {
+func (s *Service) taskCreateScript(ctx context.Context, in platform.Inbound, cronFields []string, rawPath, desc, targetPlat string) (string, error) {
 	real, err := s.CheckScript(rawPath)
 	if err != nil {
 		return "⚠️ " + err.Error(), nil
@@ -772,16 +859,19 @@ func (s *Service) taskCreateScript(ctx context.Context, in platform.Inbound, cro
 	if desc == "" {
 		desc = "运行脚本 " + filepath.Base(real)
 	}
-	return s.taskCreateCron(ctx, in, cronFields, desc, real)
+	return s.taskCreateCron(ctx, in, cronFields, desc, real, targetPlat)
 }
 
-func (s *Service) taskCreateCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt, script string) (string, error) {
+func (s *Service) taskCreateCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt, script, targetPlat string) (string, error) {
 	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", err
 	}
 	if len(existing) >= s.taskLimit() {
 		return fmt.Sprintf("这个聊天最多 %d 个定时任务，先用 /task del 删掉一些。", s.taskLimit()), nil
+	}
+	if msg := s.checkTargetPlatform(targetPlat); msg != "" {
+		return msg, nil
 	}
 	expr := strings.Join(cronFields, " ")
 	specObj := schedule.Spec{Kind: "cron", Cron: expr}
@@ -799,24 +889,139 @@ func (s *Service) taskCreateCron(ctx context.Context, in platform.Inbound, cronF
 	}
 	summary := fmt.Sprintf("Cron (%s)：%s", expr, summarizeSessionTitle(prompt))
 	id, err := s.Store.AddTask(ctx, store.Task{
-		Platform: in.Platform,
-		ChatID:   in.ChatID,
-		UserID:   in.UserID,
-		Spec:     string(rawSpec),
-		Prompt:   prompt,
-		Summary:  summary,
-		NextRun:  next,
-		Script:   script,
+		Platform:       in.Platform,
+		ChatID:         in.ChatID,
+		UserID:         in.UserID,
+		Spec:           string(rawSpec),
+		Prompt:         prompt,
+		Summary:        summary,
+		NextRun:        next,
+		Script:         script,
+		TargetPlatform: targetPlat,
 	})
 	if err != nil {
 		return "", err
 	}
 	warn := s.syncScheduler(ctx)
-	reply := fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04"))
+	reply := fmt.Sprintf("已创建 #%d：%s。下次执行：%s。%s", id, summary, next.In(s.location()).Format("01-02 15:04"), formatPlatformSuffix(targetPlat))
 	if script != "" {
 		reply += "\n📜 脚本任务：" + script + "（到点直接运行，不调用 Codex；成功时由脚本自行推送，失败时机器人推送告警）"
 	}
 	return reply + warn, nil
+}
+
+func (s *Service) taskSetPlatform(ctx context.Context, rawID, rawPlatform string) (string, error) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(strings.TrimSpace(rawID), "#"), 10, 64)
+	if err != nil || id <= 0 {
+		return "任务编号不对，可发 /task list 查看。", nil
+	}
+	t, ok, err := s.Store.TaskByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return fmt.Sprintf("没有 #%d 这个定时任务，可发 /task list 查看。", id), nil
+	}
+	if strings.TrimSpace(rawPlatform) == "" {
+		cur := "全平台推送"
+		if t.TargetPlatform != "" {
+			cur = "仅推送 " + fullPlatformName(t.TargetPlatform)
+		}
+		return fmt.Sprintf("#%d（%s）当前设置：%s。\n用法：`/task platform %d <tg|dc|all>`", id, t.Summary, cur, id), nil
+	}
+	targetPlat, valid := parseTaskTargetPlatform(rawPlatform)
+	if !valid {
+		return fmt.Sprintf("不支持的平台 %q（可选 tg / telegram、dc / discord 或 all）。", rawPlatform), nil
+	}
+	if msg := s.checkTargetPlatform(targetPlat); msg != "" {
+		return msg, nil
+	}
+	if _, err := s.Store.SetTaskTargetPlatform(ctx, id, targetPlat); err != nil {
+		return "", err
+	}
+	if targetPlat == "" {
+		return fmt.Sprintf("已设置 #%d（%s）为全平台推送。", id, t.Summary), nil
+	}
+	return fmt.Sprintf("已设置 #%d（%s）仅推送 %s。", id, t.Summary, fullPlatformName(targetPlat)), nil
+}
+
+func parseTaskTargetPlatform(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "telegram", "tg":
+		return platform.Telegram, true
+	case "discord", "dc":
+		return platform.Discord, true
+	case "all", "both", "全平台", "双端", "双平台", "全部":
+		return "", true
+	default:
+		return "", false
+	}
+}
+
+func resolveParsedTargetPlatform(parsedTarget, existingTarget string) string {
+	switch parsedTarget {
+	case platform.Telegram, platform.Discord:
+		return parsedTarget
+	case "all":
+		return ""
+	default:
+		return existingTarget
+	}
+}
+
+func formatPlatformSuffix(targetPlat string) string {
+	if targetPlat == "" {
+		return ""
+	}
+	return fmt.Sprintf("（仅推送 %s）", fullPlatformName(targetPlat))
+}
+
+func (s *Service) checkTargetPlatform(targetPlat string) string {
+	if targetPlat == "" || len(s.Senders) == 0 {
+		return ""
+	}
+	if s.Senders[targetPlat] == nil {
+		return fmt.Sprintf("⚠️ 当前未配置 %s 机器人，无法设为仅推送 %s。", fullPlatformName(targetPlat), fullPlatformName(targetPlat))
+	}
+	return ""
+}
+
+func cutFirstField(s string) (first, rest string, hasRest bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", false
+	}
+	idx := strings.IndexFunc(s, unicode.IsSpace)
+	if idx < 0 {
+		return s, "", false
+	}
+	return s[:idx], strings.TrimSpace(s[idx:]), true
+}
+
+func trimLeadingPlatformFlag(arg string) (targetPlat string, hasFlag bool, rest string, errMsg string) {
+	s := strings.TrimSpace(arg)
+	tok, tail, hasTail := cutFirstField(s)
+	switch {
+	case tok == "-p" || tok == "--platform":
+		if !hasTail {
+			return "", false, "", "参数 --platform 缺少值（可选 tg、dc 或 all）。"
+		}
+		val, tail2, _ := cutFirstField(tail)
+		plat, ok := parseTaskTargetPlatform(val)
+		if !ok {
+			return "", false, "", fmt.Sprintf("不支持的平台 %q（可选 tg / telegram、dc / discord 或 all）。", val)
+		}
+		return plat, true, tail2, ""
+	case strings.HasPrefix(tok, "--platform=") || strings.HasPrefix(tok, "-p="):
+		_, val, _ := strings.Cut(tok, "=")
+		plat, ok := parseTaskTargetPlatform(val)
+		if !ok {
+			return "", false, "", fmt.Sprintf("不支持的平台 %q（可选 tg / telegram、dc / discord 或 all）。", val)
+		}
+		return plat, true, tail, ""
+	default:
+		return "", false, s, ""
+	}
 }
 
 // taskBindScript turns an existing task into a script task (or back into a prompt task when
@@ -875,10 +1080,22 @@ func (s *Service) cachedChat(plat string) string {
 	return s.dmChannels[plat]
 }
 
-// taskTargets returns all configured platform recipients (Telegram and Discord) for a scheduled task.
+// taskTargets returns the configured platform recipients for a scheduled task:
+// a single platform when t.TargetPlatform is set, or all configured platforms otherwise.
 func (s *Service) taskTargets(ctx context.Context, t store.Task) []taskTarget {
 	if len(s.Senders) == 0 {
 		return nil
+	}
+	if t.TargetPlatform != "" {
+		sender := s.Senders[t.TargetPlatform]
+		if sender == nil {
+			return nil
+		}
+		chatID := s.resolvePlatformChat(ctx, t.TargetPlatform, t.Platform, t.ChatID)
+		if chatID == "" {
+			return nil
+		}
+		return []taskTarget{{Platform: t.TargetPlatform, ChatID: chatID, Sender: sender}}
 	}
 	order := []string{platform.Telegram, platform.Discord}
 	seen := map[string]bool{platform.Telegram: true, platform.Discord: true}

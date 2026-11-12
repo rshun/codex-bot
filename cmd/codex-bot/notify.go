@@ -331,6 +331,11 @@ func runPushCommand(ctx context.Context, cfg config.Config, db *store.Store, pol
 }
 
 func targetPlatforms(ctx context.Context, cfg config.Config, db *store.Store, req pushRequest) ([]string, error) {
+	if req.Platform == "" && req.ChatID == "" {
+		if envPlat := normalizePlatform(os.Getenv("CODEX_BOT_TASK_PLATFORM")); envPlat != "" {
+			req.Platform = envPlat
+		}
+	}
 	if req.Platform != "" {
 		switch req.Platform {
 		case platform.Telegram:

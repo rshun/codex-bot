@@ -136,6 +136,17 @@ func TestTargetPlatformsDefaultDualPush(t *testing.T) {
 	if _, err := targetPlatforms(ctx, dualCfg, nil, pushRequest{ChatID: "99999", Text: "hello"}); err == nil {
 		t.Fatal("expected error for unknown --chat without -p on dual platform")
 	}
+
+	// `CODEX_BOT_TASK_PLATFORM` restricts default push for single-platform script tasks, while explicit `-p` still wins.
+	t.Setenv("CODEX_BOT_TASK_PLATFORM", "telegram")
+	plats, err = targetPlatforms(ctx, dualCfg, nil, pushRequest{Text: "hello"})
+	if err != nil || !reflect.DeepEqual(plats, []string{platform.Telegram}) {
+		t.Fatalf("env task platform tg got %v, err=%v", plats, err)
+	}
+	plats, err = targetPlatforms(ctx, dualCfg, nil, pushRequest{Platform: platform.Discord, Text: "hello"})
+	if err != nil || !reflect.DeepEqual(plats, []string{platform.Discord}) {
+		t.Fatalf("explicit -p dc override got %v, err=%v", plats, err)
+	}
 }
 
 func TestEnvCandidateAndResolveDataDir(t *testing.T) {
