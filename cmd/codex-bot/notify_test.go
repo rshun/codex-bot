@@ -10,6 +10,7 @@ import (
 
 	"github.com/rshun/codex-bot/internal/config"
 	"github.com/rshun/codex-bot/internal/platform"
+	"github.com/rshun/codex-bot/internal/sandbox"
 )
 
 func TestParsePushArgs(t *testing.T) {
@@ -167,5 +168,22 @@ func TestEnvCandidateAndResolveDataDir(t *testing.T) {
 	nonExistentDefault := filepath.Join(t.TempDir(), "missing-data")
 	if got := resolveDataDir(nonExistentDefault, wantEnv, []string{exeDir}); got != dataDir {
 		t.Fatalf("resolveDataDir got %q, want %q", got, dataDir)
+	}
+}
+
+func TestIsNoReplyPushTextAndRunPushSilentSkip(t *testing.T) {
+	for _, s := range []string{"[[NO_REPLY]]", "  [[NO_REPLY]]\n", "`[[NO_REPLY]]`"} {
+		if !isNoReplyPushText(s) {
+			t.Fatalf("expected isNoReplyPushText(%q) == true", s)
+		}
+	}
+	for _, s := range []string{"", "正常通知", "[[NO_REPLY]] 附带内容"} {
+		if isNoReplyPushText(s) {
+			t.Fatalf("expected isNoReplyPushText(%q) == false", s)
+		}
+	}
+	// Calling runPushCommand with [[NO_REPLY]] and no files exits silently without requiring bot tokens.
+	if err := runPushCommand(context.Background(), config.Config{}, nil, sandbox.Policy{}, []string{"[[NO_REPLY]]"}); err != nil {
+		t.Fatalf("expected silent nil return for [[NO_REPLY]], got %v", err)
 	}
 }

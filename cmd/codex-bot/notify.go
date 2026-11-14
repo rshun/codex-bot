@@ -280,6 +280,12 @@ func normalizePlatform(raw string) string {
 	}
 }
 
+func isNoReplyPushText(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	trimmed = strings.TrimSpace(strings.Trim(trimmed, "`"))
+	return trimmed == "[[NO_REPLY]]"
+}
+
 func runPushCommand(ctx context.Context, cfg config.Config, db *store.Store, policy sandbox.Policy, args []string) error {
 	piped := false
 	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
@@ -293,6 +299,12 @@ func runPushCommand(ctx context.Context, cfg config.Config, db *store.Store, pol
 	if req.Help {
 		fmt.Println(pushUsage)
 		return nil
+	}
+	if isNoReplyPushText(req.Text) {
+		if len(req.Files) == 0 {
+			return nil
+		}
+		req.Text = ""
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)

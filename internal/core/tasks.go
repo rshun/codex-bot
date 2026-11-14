@@ -337,7 +337,10 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 				Text:        target.Prompt,
 				TextMessage: true,
 			}
-			reply, files := s.runTask(ctx, runIn, primary.Sender, *target)
+			reply, files, silent := s.runTaskWithProgress(ctx, runIn, primary.Sender, *target, onTool)
+			if silent {
+				return taskHeader(*target) + "\n\n本次试跑执行正常，无结果产出（正式定时触发时将静默跳过推送）。", nil, nil
+			}
 			s.deliverTask(ctx, *target, primary.Platform, primary.ChatID, primary.Sender, reply, files)
 			return fmt.Sprintf("已试跑 #%d（%s），结果已仅推送至 %s。", target.ID, target.Summary, fullPlatformName(target.TargetPlatform)), nil, nil
 		}
@@ -349,7 +352,10 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 			Text:        target.Prompt,
 			TextMessage: true,
 		}
-		reply, files := s.runTaskWithProgress(ctx, runIn, out, *target, onTool)
+		reply, files, silent := s.runTaskWithProgress(ctx, runIn, out, *target, onTool)
+		if silent {
+			return taskHeader(*target) + "\n\n本次试跑执行正常，无结果产出（正式定时触发时将静默跳过推送）。", nil, nil
+		}
 		s.mirrorTaskToPeers(ctx, *target, in.Platform, reply, files)
 		return reply, files, nil
 	case "update":
@@ -674,7 +680,9 @@ func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 	if t.Script != "" {
 		// Script tasks report themselves on success (e.g. via `codex-bot send`); only failures are pushed.
 		text, ok := s.runScriptTask(ctx, t)
-		if !ok {
+		if ok {
+			slog.Info("scheduled script task completed; notification suppressed", "task", t.ID)
+		} else {
 			s.deliverTask(ctx, t, "", "", nil, text, nil)
 		}
 		_ = s.syncScheduler(ctx)
@@ -686,8 +694,12 @@ func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 		return fmt.Errorf("no sender configured for task %d", t.ID)
 	}
 	in := platform.Inbound{Platform: primary.Platform, ChatID: primary.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true}
-	text, files := s.runTask(ctx, in, primary.Sender, t)
-	s.deliverTask(ctx, t, primary.Platform, primary.ChatID, primary.Sender, text, files)
+	text, files, silent := s.runTask(ctx, in, primary.Sender, t)
+	if silent {
+		slog.Info("scheduled task completed with no output; notification suppressed", "task", t.ID)
+	} else {
+		s.deliverTask(ctx, t, primary.Platform, primary.ChatID, primary.Sender, text, files)
+	}
 	_ = s.syncScheduler(ctx)
 	return nil
 }
@@ -761,36 +773,49 @@ func (s *Service) runDue(ctx context.Context) {
 }
 
 // runTask answers a task in a fresh session that is never saved as the chat's session.
-// It returns the message to send and the files the run queued.
-func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task) (string, []actions.File) {
+// It returns the message to send, the files the run queued, and whether output was intentionally suppressed.
+func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task) (string, []actions.File, bool) {
 	return s.runTaskWithProgress(ctx, in, out, t, nil)
 }
 
-func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task, onTool func(codex.ToolUse)) (string, []actions.File) {
+func isTaskSilentReply(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || trimmed == noReply {
+		return true
+	}
+	trimmed = strings.TrimSpace(strings.Trim(trimmed, "`"))
+	return trimmed == noReply
+}
+
+func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task, onTool func(codex.ToolUse)) (string, []actions.File, bool) {
 	if t.Script != "" {
-		text, _ := s.runScriptTask(ctx, t)
-		return text, nil
+		text, ok := s.runScriptTask(ctx, t)
+		if ok {
+			return "", nil, true
+		}
+		return text, nil, false
 	}
 	header := taskHeader(t)
 	chat, err := s.Store.Chat(ctx, t.Platform, t.ChatID)
 	if err != nil {
-		return header + "\n\n" + codex.UserFacing(err), nil
+		return header + "\n\n" + codex.UserFacing(err), nil, false
 	}
 	sessionID, err := newUUID()
 	if err != nil {
-		return header + "\n\n" + codex.UserFacing(err), nil
+		return header + "\n\n" + codex.UserFacing(err), nil, false
 	}
 	var unsafeMedia atomic.Bool
 	imageGen := s.canGenerateImages(out)
 	opts := codex.ReplyOptions{
-		SessionID:  sessionID,
-		NewSession: true,
-		Model:      chat.Model,
-		Prompt:     t.Prompt,
-		WebSearch:  s.WebSearch,
-		ImageGen:   imageGen,
-		OnTool:     wrapToolSafetyMonitor(onTool, imageGen, &unsafeMedia),
-		Memories:   s.chatMemories(ctx, t.Platform, t.ChatID),
+		SessionID:     sessionID,
+		NewSession:    true,
+		Model:         chat.Model,
+		Prompt:        t.Prompt,
+		WebSearch:     s.WebSearch,
+		ImageGen:      imageGen,
+		OnTool:        wrapToolSafetyMonitor(onTool, imageGen, &unsafeMedia),
+		Memories:      s.chatMemories(ctx, t.Platform, t.ChatID),
+		ScheduledTask: true,
 	}
 	_ = s.newSessionOptions(ctx, &opts)
 	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)
@@ -803,7 +828,7 @@ func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, 
 	}
 	if err != nil {
 		slog.Error("task run failed", "task", t.ID, "err", err)
-		return header + "\n\n" + codex.UserFacing(err), nil
+		return header + "\n\n" + codex.UserFacing(err), nil, false
 	}
 	var files []actions.File
 	if turn != nil {
@@ -814,18 +839,18 @@ func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, 
 		text = cleanLocalImageRefs(text)
 	}
 	if unsafeMedia.Load() {
-		return header + "\n\n" + media.ErrUnsafeMedia.Error(), nil
+		return header + "\n\n" + media.ErrUnsafeMedia.Error(), nil, false
 	}
 	if len(result.GeneratedImages) > 0 {
 		files = s.appendGeneratedImages(files, result.GeneratedImages, out)
 	}
-	if strings.TrimSpace(text) == "" {
+	if isTaskSilentReply(text) {
 		if len(files) > 0 {
-			return header + "\n\n" + mediaDeliveredFallback, files
+			return header + "\n\n" + mediaDeliveredFallback, files, false
 		}
-		return header + "\n\n" + emptyReplyText, files
+		return "", nil, true
 	}
-	return header + "\n\n" + text, files
+	return header + "\n\n" + text, files, false
 }
 
 func taskHeader(t store.Task) string {

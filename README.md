@@ -145,7 +145,7 @@ sudo systemctl enable --now codex-bot
 
 | 命令 | 用法与说明 |
 | :--- | :--- |
-| `/status` | 查看运行状态、版本、调度器状态、权限开关、数据统计与 MCP 概览（附快捷操作面板按钮） |
+| `/status` | 查看运行状态、版本、调度器状态、权限开关、数据统计与 MCP 名称概览（自动隐藏 URL，附快捷操作面板按钮） |
 | `/stop` | 立即中断当前正在运行的对话或长任务（同 `/cancel`，或运行中直接发「停止」「停一下」） |
 | `/new [备注]` | 归档当前会话并开启新话题（长期记忆继续保留，附一键切回按钮） |
 | `/sessions` | 查看跨平台保存的历史会话；`/sessions <编号>` 一键切换/跨端接力；`/sessions del <编号>` 删除归档 |
@@ -154,7 +154,7 @@ sudo systemctl enable --now codex-bot
 | `/quota` | 实时查询 ChatGPT/Codex 账号窗口剩余配额百分比与重置时间 |
 | `/memory` | 查看跨平台共享长期记忆；支持 `add <内容>`、`del <编号>`、`clear`，或直接说「长期记忆：…」 |
 | `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`-p tg\|dc`、`cron`、`script`、`platform`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
-| `/mcp` | 管理 MCP 服务：`/mcp` 列表、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
+| `/mcp` | 管理 MCP 服务：`/mcp` 仅列出服务名称（隐藏连接 URL/启动参数）、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
 | `/dir` | 查看可写目录白名单；`/dir add rw /绝对路径` 授权写入；`/dir del /绝对路径` 收回权限（或直接说「允许写入 /srv/out」） |
 | `/shell` | 查看或切换命令执行权限（`/shell on` / `/shell off`，或直接说「开启命令执行」「关闭命令执行」） |
 | `/reset` | 清空当前聊天的上下文关联并换新会话（长期记忆永久保留） |
@@ -198,6 +198,7 @@ sudo systemctl enable --now codex-bot
 - 每次触发均使用独立会话，不污染日常聊天上下文，结果以 `⏰ 定时任务 #编号` 推送：
   - **默认全平台推送**：未指定平台时同时推送到已配置的 Telegram 与 Discord。
   - **指定单平台推送**：创建时可直接在自然语言中说明（如「`/task 每天早上 8:30 汇总今日科技要闻，只推 TG`」「`仅发 Discord`」「`只推当前平台`」），或使用 `-p tg` / `-p dc` 参数（如 `/task -p tg ...`、`/task cron -p dc ...`）；已有任务可随时通过 `/task platform <编号> <tg|dc|all>`（或自然语言「把任务 1 改成只推 TG / 全平台推送」）切换。
+  - **条件巡检无结果静默（`[[NO_REPLY]]`）**：条件检查/监控类定时任务在业务正常、无结果且无附件需汇报时会自动返回 `[[NO_REPLY]]` 并静默跳过推送（正常推进下次执行时间）；有结果产出或运行报错时照常通知。
 
 ##### 本机脚本任务（`/task script` / `/task bind`）
 对于逻辑固定或耗时的自动化任务（如定时下单、数据采集、日报生成），可直接绑定本机脚本执行，**不调用 Codex、不占会话、零额度消耗**：
@@ -436,7 +437,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 
 | Command | Description |
 | :--- | :--- |
-| `/status` | View bot version, runtime status, OS scheduler state, permission flags, stats, and MCP overview (with quick-action buttons) |
+| `/status` | View bot version, runtime status, OS scheduler state, permission flags, stats, and MCP server names (URLs hidden; with quick-action buttons) |
 | `/stop` | Immediately abort the currently running response or task (alias: `/cancel`, or send `"停止"` while running) |
 | `/new [note]` | Archive the current session and start a fresh topic (long-term memories remain intact; includes a one-click switch-back button) |
 | `/sessions` | List saved sessions across TG & Discord; `/sessions <id>` to switch or hand off cross-platform; `/sessions del <id>` to delete |
@@ -445,7 +446,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 | `/quota` | Query live ChatGPT/Codex rate-limit windows and reset times via `codex app-server` |
 | `/memory` | View shared long-term memories; supports `add <text>`, `del <id>`, `clear`, or natural language |
 | `/task` | Manage scheduled & script tasks (`<natural language>`, `-p tg\|dc`, `cron`, `script`, `platform`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
-| `/mcp` | Manage MCP servers: `/mcp` list, `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
+| `/mcp` | Manage MCP servers: `/mcp` list (names only, hiding URLs/args), `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
 | `/dir` | View writable directories; `/dir add rw /abs/path` to grant write access; `/dir del /abs/path` to revoke |
 | `/shell` | View or toggle server command execution (`/shell on` / `/shell off`) |
 | `/reset` | Clear the current chat's session binding and start fresh (shared `/memory` entries are preserved) |
@@ -485,7 +486,7 @@ Create tasks in natural language (e.g., `/task Summarize top tech news every wee
   - **Linux / Unix**: Managed block inside the service user's `crontab` (`# BEGIN CODEX-BOT TASKS` ... `# END CODEX-BOT TASKS`).
   - **macOS**: `~/Library/LaunchAgents/com.codexbot.task.<id>.plist` via `launchctl`.
   - **Windows**: Windows Task Scheduler under `\CodexBot\Task_<id>`.
-- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to all configured platforms by default — or to a single platform when specified in natural language (e.g., `"only push to TG"`), via `-p tg` / `-p dc` on `/task` / `/task cron` / `/task script`, or toggled anytime via `/task platform <id> <tg|dc|all>`.
+- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to all configured platforms by default — or to a single platform when specified in natural language (e.g., `"only push to TG"`), via `-p tg` / `-p dc` on `/task` / `/task cron` / `/task script`, or toggled anytime via `/task platform <id> <tg|dc|all>`. Condition/monitoring checks that finish cleanly with no output (`[[NO_REPLY]]`) and no attachments stay silent while advancing the next scheduled run; anomalies and errors still push alerts normally.
 
 ##### Local Script Tasks (`/task script` / `/task bind`)
 Offload deterministic or long-running jobs (e.g., automated ordering, scrapers, ETL reports) to local scripts while managing their schedule from chat — **zero Codex invocations and zero quota usage**:

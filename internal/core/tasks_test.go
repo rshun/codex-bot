@@ -283,15 +283,39 @@ func TestTaskRunIgnoresGrants(t *testing.T) {
 	}
 }
 
-func TestTaskEmptyAnswerReportsFailure(t *testing.T) {
+func TestTaskEmptyAnswerSuppressesAndErrorReportsFailure(t *testing.T) {
+	ctx := context.Background()
 	svc, engine, sent := taskService(t, dailyNews)
+
+	// 1. runErr == nil with empty/whitespace text and no attachments -> silently suppressed, NextRun advances.
 	engine.replyFor = func(opts codex.ReplyOptions) (codex.HeadlessResult, error) {
 		return codex.HeadlessResult{Text: "  \n", SessionID: opts.SessionID}, nil
 	}
-	addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", taskNow.Add(-10*time.Second))
-	svc.runDue(context.Background())
+	id := addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone))
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	sent.mu.Lock()
+	if len(sent.msgs) != 0 {
+		t.Fatalf("expected 0 messages for empty successful task run, got %#v", sent.msgs)
+	}
+	sent.mu.Unlock()
+	task, ok, _ := svc.Store.TaskByID(ctx, id)
+	if !ok || !task.NextRun.Equal(time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone)) {
+		t.Fatalf("expected NextRun to advance to 10-20 09:00, got %#v", task)
+	}
+
+	// 2. runErr != nil -> pushes failure alert normally.
+	engine.replyFor = func(opts codex.ReplyOptions) (codex.HeadlessResult, error) {
+		return codex.HeadlessResult{}, &codex.RunError{Message: "upstream timeout"}
+	}
+	svc.Now = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 	got := sent.wait(t, 1)
-	want := "⏰ 定时任务 #1：每天 09:00：看新闻\n\n处理失败：没有得到回复。"
+	want := "⏰ 定时任务 #1：每天 09:00：看新闻\n\nupstream timeout"
 	if got[0] != want {
 		t.Fatalf("got %q, want %q", got[0], want)
 	}
@@ -729,5 +753,69 @@ func TestSinglePlatformAndDefaultAllPlatformDelivery(t *testing.T) {
 	gotUnconf := cmdReply.wait(t, 7)[6]
 	if !strings.Contains(gotUnconf, "未配置 Discord") {
 		t.Fatalf("expected unconfigured Discord warning, got: %q", gotUnconf)
+	}
+}
+
+func TestTaskNoReplySuppressesScheduledPush(t *testing.T) {
+	ctx := context.Background()
+	svc, engine, tgSent := taskService(t, dailyNews)
+	dcRec := &recorder{}
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders[platform.Discord] = &fakeDiscordSender{rec: dcRec}
+
+	id := addTask(t, svc, "9", dailyNews, "每天 09:00：条件巡检", time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone))
+
+	// 1. Scheduled run returning [[NO_REPLY]] passes ScheduledTask=true, suppresses push on both TG & Discord, and advances NextRun.
+	var sawScheduledOpt bool
+	engine.replyFor = func(opts codex.ReplyOptions) (codex.HeadlessResult, error) {
+		sawScheduledOpt = opts.ScheduledTask
+		return codex.HeadlessResult{Text: "  [[NO_REPLY]]\n", SessionID: opts.SessionID}, nil
+	}
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if !sawScheduledOpt {
+		t.Fatal("expected ScheduledTask=true in ReplyOptions")
+	}
+	tgSent.mu.Lock()
+	tgCount := len(tgSent.msgs)
+	tgSent.mu.Unlock()
+	dcRec.mu.Lock()
+	dcCount := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if tgCount != 0 || dcCount != 0 {
+		t.Fatalf("expected 0 pushes on [[NO_REPLY]], got tg=%d dc=%d", tgCount, dcCount)
+	}
+	task, ok, _ := svc.Store.TaskByID(ctx, id)
+	if !ok || !task.NextRun.Equal(time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone)) {
+		t.Fatalf("expected NextRun to advance to 10-20 09:00, got %#v", task)
+	}
+
+	// 2. Manual `/task run 1` with [[NO_REPLY]] returns friendly local status without raw [[NO_REPLY]] or Discord mirroring.
+	cmdReply := &recorder{}
+	say(svc, cmdReply, "/task run 1")
+	gotTrial := cmdReply.wait(t, 1)[0]
+	if strings.Contains(gotTrial, "[[NO_REPLY]]") || !strings.Contains(gotTrial, "无结果产出") {
+		t.Fatalf("unexpected /task run silent reply: %q", gotTrial)
+	}
+	dcRec.mu.Lock()
+	if len(dcRec.msgs) != 0 {
+		t.Fatalf("expected 0 Discord mirror messages on silent /task run, got %#v", dcRec.msgs)
+	}
+	dcRec.mu.Unlock()
+
+	// 3. Normal output on next scheduled run pushes to both TG & Discord.
+	engine.replyFor = func(opts codex.ReplyOptions) (codex.HeadlessResult, error) {
+		return codex.HeadlessResult{Text: "发现异常：队列积压", SessionID: opts.SessionID}, nil
+	}
+	svc.Now = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	gotTG := tgSent.wait(t, 1)[0]
+	gotDC := dcRec.wait(t, 1)[0]
+	if !strings.Contains(gotTG, "发现异常：队列积压") || !strings.Contains(gotDC, "发现异常：队列积压") {
+		t.Fatalf("expected alert on both platforms, got tg=%q dc=%q", gotTG, gotDC)
 	}
 }
