@@ -47,7 +47,15 @@ type Config struct {
 	ScriptDirs []string
 	// ScriptTimeout bounds one script task run.
 	ScriptTimeout time.Duration
-	Version       string
+	// AutoUpgrade enables daily background checks and upgrades for codex-bot and Codex CLI.
+	AutoUpgrade bool
+	// AutoUpgradeTime is the daily HH:MM check time in Location (defaults to "04:30").
+	AutoUpgradeTime string
+	// UpgradeRepo is the GitHub owner/repo for codex-bot releases (defaults to "rshun/codex-bot").
+	UpgradeRepo string
+	// NPMBin is the npm executable used to check and upgrade @openai/codex (defaults to "npm").
+	NPMBin  string
+	Version string
 }
 
 func Load() (Config, error) {
@@ -201,6 +209,31 @@ func Load() (Config, error) {
 	if auth == "" {
 		auth = filepath.Join(codexHome, "auth.json")
 	}
+	autoUpgrade := false
+	if raw := strings.TrimSpace(os.Getenv("AUTO_UPGRADE")); raw != "" {
+		autoUpgrade, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("AUTO_UPGRADE must be true or false")
+		}
+	}
+	autoUpgradeTime := strings.TrimSpace(os.Getenv("AUTO_UPGRADE_TIME"))
+	if autoUpgradeTime == "" {
+		autoUpgradeTime = "04:30"
+	} else {
+		normTime, timeErr := normalizeClockHHMM(autoUpgradeTime)
+		if timeErr != nil {
+			return Config{}, fmt.Errorf("AUTO_UPGRADE_TIME: %w", timeErr)
+		}
+		autoUpgradeTime = normTime
+	}
+	upgradeRepo := strings.TrimSpace(os.Getenv("UPGRADE_REPO"))
+	if upgradeRepo == "" {
+		upgradeRepo = "rshun/codex-bot"
+	}
+	npmBin := strings.TrimSpace(os.Getenv("NPM_BIN"))
+	if npmBin == "" {
+		npmBin = "npm"
+	}
 	return Config{
 		TelegramToken:   token,
 		DiscordToken:    discordToken,
@@ -225,7 +258,24 @@ func Load() (Config, error) {
 		TaskMinInterval: minInterval,
 		ScriptDirs:      scriptDirs,
 		ScriptTimeout:   scriptTimeout,
+		AutoUpgrade:     autoUpgrade,
+		AutoUpgradeTime: autoUpgradeTime,
+		UpgradeRepo:     upgradeRepo,
+		NPMBin:          npmBin,
 	}, nil
+}
+
+func normalizeClockHHMM(raw string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(raw), ":")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("must be HH:MM (e.g. 04:30)")
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return "", fmt.Errorf("must be HH:MM between 00:00 and 23:59")
+	}
+	return fmt.Sprintf("%02d:%02d", h, m), nil
 }
 
 func parseCSVList(raw string) []string {
@@ -373,6 +423,8 @@ func ensureUnixPath(home string) {
 		}
 	}
 	candidates := []string{
+		filepath.Join(home, "bin"),
+		filepath.Join(home, ".npm-global", "bin"),
 		filepath.Join(home, ".local", "bin"),
 		filepath.Join(home, ".bun", "bin"),
 		"/opt/homebrew/bin",

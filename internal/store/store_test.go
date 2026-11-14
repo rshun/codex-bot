@@ -315,6 +315,27 @@ func TestGlobalMemoriesAndDeleteTaskByID(t *testing.T) {
 	}
 }
 
+func TestBackupBeforeUpgrade(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	if err := s.PutSetting(ctx, "sample_key", "sample_val"); err != nil {
+		t.Fatal(err)
+	}
+	bakPath, err := s.BackupBeforeUpgrade(ctx, "v2.1.1")
+	if err != nil {
+		t.Fatalf("BackupBeforeUpgrade failed: %v", err)
+	}
+	info, err := os.Stat(bakPath)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("backup file invalid: info=%v err=%v", info, err)
+	}
+	// Second call for the same version reuses the existing snapshot idempotently.
+	bakPath2, err := s.BackupBeforeUpgrade(ctx, "v2.1.1")
+	if err != nil || bakPath2 != bakPath {
+		t.Fatalf("expected idempotent backup path %q, got %q (err=%v)", bakPath, bakPath2, err)
+	}
+}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "data"), "gpt-5.4")

@@ -196,3 +196,49 @@ func TestLoadUserProfile(t *testing.T) {
 		t.Fatalf("EXISTING_BOT_VAR overwritten: %q", got)
 	}
 }
+
+func TestLoadAutoUpgradeConfig(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+	t.Setenv("DISCORD_BOT_TOKEN", "")
+	t.Setenv("ALLOWED_USER_IDS", "1")
+	t.Setenv("AUTO_UPGRADE", "")
+	t.Setenv("AUTO_UPGRADE_TIME", "")
+	t.Setenv("UPGRADE_REPO", "")
+	t.Setenv("NPM_BIN", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AutoUpgrade || cfg.AutoUpgradeTime != "04:30" || cfg.UpgradeRepo != "rshun/codex-bot" || cfg.NPMBin != "npm" {
+		t.Fatalf("unexpected defaults: %#v", cfg)
+	}
+
+	t.Setenv("AUTO_UPGRADE", "true")
+	t.Setenv("AUTO_UPGRADE_TIME", "5:05")
+	t.Setenv("UPGRADE_REPO", "example/codex-bot")
+	t.Setenv("NPM_BIN", "/usr/local/bin/npm")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AutoUpgrade || cfg.AutoUpgradeTime != "05:05" || cfg.UpgradeRepo != "example/codex-bot" || cfg.NPMBin != "/usr/local/bin/npm" {
+		t.Fatalf("unexpected custom upgrade config: %#v", cfg)
+	}
+
+	for _, bad := range []struct {
+		env string
+		val string
+	}{
+		{"AUTO_UPGRADE", "not-a-bool"},
+		{"AUTO_UPGRADE_TIME", "25:00"},
+		{"AUTO_UPGRADE_TIME", "0430"},
+	} {
+		t.Run(bad.env+"="+bad.val, func(t *testing.T) {
+			t.Setenv(bad.env, bad.val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected error for %s=%q", bad.env, bad.val)
+			}
+		})
+	}
+}

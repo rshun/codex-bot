@@ -96,6 +96,9 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 	} else if schedName != "未配置" {
 		fmt.Fprintf(&b, "- 系统调度器：%s（系统原生触发）\n", schedName)
 	}
+	if s.Updater != nil {
+		fmt.Fprintf(&b, "- 自动升级：%s（每天 %s，可用 /upgrade 查看）\n", onOffText(s.autoUpgradeEnabled(ctx)), s.autoUpgradeClock())
+	}
 
 	if mcpEng, ok := s.Engine.(MCPEngine); ok {
 		if mcpOut, mcpErr := mcpEng.MCPList(ctx); mcpErr == nil {

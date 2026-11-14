@@ -8,8 +8,10 @@ Type=simple
 # The account that has already run `codex login`.
 User=codex
 EnvironmentFile=/etc/codex-bot.env
+# Tip: install the binary in a directory owned by `User=codex` (e.g. /home/codex/bin/codex-bot)
+# so in-chat `/upgrade` and `AUTO_UPGRADE=true` can atomically self-upgrade without root/sudo.
 ExecStart=/usr/local/bin/codex-bot
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]

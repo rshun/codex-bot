@@ -8,6 +8,7 @@ import (
 	"github.com/rshun/codex-bot/internal/codex"
 	"github.com/rshun/codex-bot/internal/platform"
 	"github.com/rshun/codex-bot/internal/store"
+	"github.com/rshun/codex-bot/internal/updater"
 )
 
 func shortPlatformName(plat string) string {
@@ -52,6 +53,9 @@ func statusButtons() [][]platform.Button {
 			{Label: "🧠 长期记忆", Command: "/memory", Style: platform.ButtonSecondary},
 			{Label: "🔌 MCP 诊断", Command: "/mcp doctor", Style: platform.ButtonSecondary},
 			{Label: "🤖 切换模型", Command: "/model", Style: platform.ButtonPrimary},
+		},
+		{
+			{Label: "🔄 检查更新", Command: "/upgrade", Style: platform.ButtonSecondary},
 		},
 	}
 }
@@ -221,4 +225,67 @@ func memoryListButtons(list []store.Memory) [][]platform.Button {
 		{Label: "🧹 清空全部记忆", Command: "/memory clear", Style: platform.ButtonDanger},
 	})
 	return rows
+}
+
+func upgradeButtons(rep updater.Report, autoEnabled bool) [][]platform.Button {
+	var rows [][]platform.Button
+	botReady := rep.Bot.UpdateAvailable && rep.Bot.Writable
+	cliReady := rep.CLI.UpdateAvailable && rep.CLI.Writable
+
+	var actionRow []platform.Button
+	if botReady && cliReady {
+		actionRow = append(actionRow, platform.Button{
+			Label:   "🚀 一键全部升级",
+			Command: "/upgrade run all",
+			Style:   platform.ButtonSuccess,
+		})
+	}
+	if botReady {
+		actionRow = append(actionRow, platform.Button{
+			Label:   fmt.Sprintf("⬆️ 升级 Bot (%s)", rep.Bot.Latest),
+			Command: "/upgrade run bot",
+			Style:   platform.ButtonPrimary,
+		})
+	}
+	if cliReady {
+		actionRow = append(actionRow, platform.Button{
+			Label:   fmt.Sprintf("⬆️ 升级 CLI (%s)", rep.CLI.Latest),
+			Command: "/upgrade run cli",
+			Style:   platform.ButtonPrimary,
+		})
+	}
+	if len(actionRow) > 0 {
+		rows = append(rows, actionRow)
+	}
+
+	autoBtn := platform.Button{
+		Label:   "⏰ 开启自动升级",
+		Command: "/upgrade auto on",
+		Style:   platform.ButtonSuccess,
+	}
+	if autoEnabled {
+		autoBtn = platform.Button{
+			Label:   "⏸ 关闭自动升级",
+			Command: "/upgrade auto off",
+			Style:   platform.ButtonSecondary,
+		}
+	}
+	rows = append(rows, []platform.Button{
+		{Label: "🔄 重新检查", Command: "/upgrade check", Style: platform.ButtonSecondary},
+		autoBtn,
+	})
+	return rows
+}
+
+func autoUpgradeToggleButtons(enabled bool) [][]platform.Button {
+	if enabled {
+		return [][]platform.Button{{
+			{Label: "⏸ 关闭自动升级", Command: "/upgrade auto off", Style: platform.ButtonDanger},
+			{Label: "🔄 检查当前更新", Command: "/upgrade check", Style: platform.ButtonSecondary},
+		}}
+	}
+	return [][]platform.Button{{
+		{Label: "⏰ 开启自动升级", Command: "/upgrade auto on", Style: platform.ButtonSuccess},
+		{Label: "🔄 检查当前更新", Command: "/upgrade check", Style: platform.ButtonSecondary},
+	}}
 }

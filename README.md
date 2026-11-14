@@ -136,6 +136,10 @@ sudo systemctl enable --now codex-bot
 | `TASK_MIN_INTERVAL` | 否 | `60m` | 周期性定时任务的最小触发间隔 |
 | `SCRIPT_DIRS` | 否 | `~/bin` | 允许绑定为脚本任务的目录白名单（绝对路径，多个用逗号分隔） |
 | `SCRIPT_TIMEOUT` | 否 | `30m` | 单次脚本任务执行的最长超时时间 |
+| `AUTO_UPGRADE` | 否 | `false` | 启动时默认的每日自动升级开关（运行中可通过 `/upgrade auto on\|off` 切换） |
+| `AUTO_UPGRADE_TIME` | 否 | `04:30` | 每日定时检查与自动升级的时间（`HH:MM`，跟随 `TIMEZONE`） |
+| `UPGRADE_REPO` | 否 | `rshun/codex-bot` | 检查 `codex-bot` 新版本的 GitHub 仓库 |
+| `NPM_BIN` | 否 | `npm` | 检查与升级 `@openai/codex` 所用的 `npm` 命令路径 |
 
 ---
 
@@ -157,6 +161,7 @@ sudo systemctl enable --now codex-bot
 | `/mcp` | 管理 MCP 服务：`/mcp` 仅列出服务名称（隐藏连接 URL/启动参数）、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
 | `/dir` | 查看可写目录白名单；`/dir add rw /绝对路径` 授权写入；`/dir del /绝对路径` 收回权限（或直接说「允许写入 /srv/out」） |
 | `/shell` | 查看或切换命令执行权限（`/shell on` / `/shell off`，或直接说「开启命令执行」「关闭命令执行」） |
+| `/upgrade` | 检查或一键升级 `codex-bot` 与 `Codex CLI`（支持 `/upgrade check`、`/upgrade run [all\|bot\|cli]`、`/upgrade auto [on\|off]`） |
 | `/reset` | 清空当前聊天的上下文关联并换新会话（长期记忆永久保留） |
 | `/help` | 查看命令帮助说明 |
 
@@ -259,21 +264,33 @@ df -h | codex-bot send
 
 ### 升级、测试与故障排查
 
-#### 平滑升级与备份
+#### 在线一键升级与每日自动升级 (`/upgrade`)
 
-升级前建议先备份 `bot.db` 数据库（升级仅替换二进制程序，会话上下文、长期记忆与定时任务均完整保留）：
+`codex-bot` 内置免 `sudo` 在线升级模块，同时支持升级 **`codex-bot` 二进制**（校验 `SHA256SUMS`、自动快照备份 `<DATA_DIR>/backups/bot.db.pre-<版本>`、自检 `--version`、平滑原地热重启并在重启后推送确认通知）与 **`@openai/codex` CLI**（通过 `npm` 升级并在自检失败时自动回滚旧版本）：
+
+- 发送 `/upgrade` 检查最新版本与目录权限，点击内联按钮即可一键升级，或发送 `/upgrade auto on` 开启每日低峰期（默认 `04:30`）自动升级。
+- **免 root 自升级目录建议**：为保持最小权限隔离（不授予服务账号 `sudo`），建议将 `codex-bot` 安装在运行用户自有目录（如 `/home/codex/bin/codex-bot`，并在 `codex-bot.service` 中指向该 `ExecStart`），同时为运行用户配置用户态 npm 全局目录：
+  ```sh
+  su - codex
+  mkdir -p ~/.npm-global ~/bin
+  npm config set prefix ~/.npm-global
+  echo 'export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.profile
+  npm install -g @openai/codex@latest
+  ```
+
+#### 服务器命令行手动升级与备份
+
+若二进制安装在 `/usr/local/bin/codex-bot`（`root` 属主），也可使用内置脚本校验 `SHA256SUMS` 并升级：
 
 ```sh
-# 1. 停止服务并备份数据库
-sudo systemctl stop codex-bot
+# 1. 备份数据库
 sudo cp -p /var/lib/codex-bot/bot.db /var/lib/codex-bot/bot.db.bak-$(date +%Y%m%d)
 
-# 2. 使用内置升级脚本（需已登录 gh CLI）或手动替换新二进制后启动
+# 2. 使用内置升级脚本自动下载校验 SHA256SUMS、保留 .prev 备份并重启服务
 sudo sh deploy/upgrade.sh
-# 若手动替换二进制，执行：sudo systemctl start codex-bot
 ```
 
-> 如需回滚，停止服务后恢复旧版二进制并重启即可。
+> 如需回滚，恢复同目录下的 `codex-bot.prev` 旧版二进制并重启服务即可。
 
 #### 离线回归测试
 
@@ -428,6 +445,10 @@ sudo systemctl enable --now codex-bot
 | `TASK_MIN_INTERVAL` | No | `60m` | Minimum interval allowed for recurring scheduled tasks |
 | `SCRIPT_DIRS` | No | `~/bin` | Comma-separated absolute directories allowed for `/task script` bindings |
 | `SCRIPT_TIMEOUT` | No | `30m` | Maximum execution duration for a single script task run |
+| `AUTO_UPGRADE` | No | `false` | Default startup state for daily background upgrades (toggleable live via `/upgrade auto on\|off`) |
+| `AUTO_UPGRADE_TIME` | No | `04:30` | Daily check and upgrade clock (`HH:MM` in `TIMEZONE`) |
+| `UPGRADE_REPO` | No | `rshun/codex-bot` | GitHub repository checked for `codex-bot` releases |
+| `NPM_BIN` | No | `npm` | `npm` executable used to check and upgrade `@openai/codex` |
 
 ---
 
@@ -449,6 +470,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 | `/mcp` | Manage MCP servers: `/mcp` list (names only, hiding URLs/args), `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
 | `/dir` | View writable directories; `/dir add rw /abs/path` to grant write access; `/dir del /abs/path` to revoke |
 | `/shell` | View or toggle server command execution (`/shell on` / `/shell off`) |
+| `/upgrade` | Check or upgrade `codex-bot` & `Codex CLI` in place (`/upgrade check`, `/upgrade run [all\|bot\|cli]`, `/upgrade auto [on\|off]`) |
 | `/reset` | Clear the current chat's session binding and start fresh (shared `/memory` entries are preserved) |
 | `/help` | Display command reference |
 
@@ -543,20 +565,33 @@ df -h | codex-bot send
 
 ### Upgrade, Testing & Troubleshooting
 
-#### Safe Upgrade & Backup
+#### In-Chat & Scheduled Auto-Upgrade (`/upgrade`)
 
-Always back up `bot.db` before upgrading (replacing the binary preserves all sessions, memories, and scheduled tasks):
+`codex-bot` includes a privilege-free built-in upgrader for both **`codex-bot`** (verifies `SHA256SUMS`, snapshots `<DATA_DIR>/backups/bot.db.pre-<ver>` via `VACUUM INTO`, runs `--version` self-checks, performs an in-place `execve` restart, and pushes a post-restart confirmation) and **`@openai/codex` CLI** (upgrades via `npm` with automatic version rollback if post-install verification fails):
+
+- Send `/upgrade` in Telegram or Discord to inspect versions and one-click upgrade buttons, or `/upgrade auto on` to enable daily off-peak upgrades (`04:30` by default).
+- **Recommended User-Writable Layout (No `sudo` Required)**: Install `codex-bot` inside a directory owned by the service user (e.g., `/home/codex/bin/codex-bot` and point `ExecStart=` there) and configure a user-writable npm prefix:
+  ```sh
+  su - codex
+  mkdir -p ~/.npm-global ~/bin
+  npm config set prefix ~/.npm-global
+  echo 'export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"' >> ~/.profile
+  npm install -g @openai/codex@latest
+  ```
+
+#### Manual Server Upgrade & Backup
+
+If `codex-bot` is installed under `/usr/local/bin/codex-bot` (owned by `root`), use the helper script to verify `SHA256SUMS`, keep a `.prev` backup, and restart `systemd`:
 
 ```sh
-# 1. Stop service and back up SQLite database
-sudo systemctl stop codex-bot
+# 1. Back up SQLite database
 sudo cp -p /var/lib/codex-bot/bot.db /var/lib/codex-bot/bot.db.bak-$(date +%Y%m%d)
 
-# 2. Upgrade via helper script (requires authenticated gh CLI) or replace binary manually
+# 2. Download, verify SHA256SUMS, back up .prev, and restart service
 sudo sh deploy/upgrade.sh
 ```
 
-> To roll back, restore the previous `codex-bot` binary and restart the service.
+> To roll back, restore `codex-bot.prev` over `codex-bot` and restart the service.
 
 #### Offline Regression Tests
 
