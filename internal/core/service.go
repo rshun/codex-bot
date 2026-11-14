@@ -289,8 +289,12 @@ func (s *Service) dispatch(it item) {
 		baseCtx = ctx
 	}
 	if it.task != nil {
-		text, files := s.runTask(ctx, it.in, it.out, *it.task)
+		text, files, silent := s.runTask(ctx, it.in, it.out, *it.task)
 		if stoppedByUser() {
+			return
+		}
+		if silent {
+			slog.Info("scheduled task completed with no output; notification suppressed", "task", it.task.ID)
 			return
 		}
 		s.deliverTask(baseCtx, *it.task, it.in.Platform, it.in.ChatID, it.out, text, files)

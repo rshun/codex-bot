@@ -79,6 +79,8 @@ type ReplyOptions struct {
 	Images []Image
 	// Memories lists persistent user facts injected into the system prompt.
 	Memories []string
+	// ScheduledTask tells Codex to answer [[NO_REPLY]] when a scheduled condition check succeeds with no output to report.
+	ScheduledTask bool
 	// MaxTurns overrides Client.MaxTurns when > 0.
 	MaxTurns int
 	// OnSession is called as soon as the CLI emits a session/thread ID, before
@@ -180,7 +182,7 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 			SessionID: res.SessionID,
 		}
 	}
-	if strings.TrimSpace(res.Text) == "" && len(res.Structured) == 0 && len(res.GeneratedImages) == 0 {
+	if opts.JSONSchema != "" && strings.TrimSpace(res.Text) == "" && len(res.Structured) == 0 {
 		return HeadlessResult{}, &RunError{
 			Message:   "Codex returned an empty response.",
 			SessionID: res.SessionID,
@@ -326,6 +328,9 @@ func extForMIME(mime string) string {
 
 func systemPromptFor(opts ReplyOptions) string {
 	var parts []string
+	if opts.ScheduledTask {
+		parts = append(parts, "You are executing an automated scheduled task. If the task checks a condition, schedule, file, or threshold (for example, checking whether a file exists, whether today is a trading day, or whether new records/anomalies exist) and everything is normal with no output or result needed, reply with exactly [[NO_REPLY]] and do not send any files or images. When the task produces content/results or encounters an error/anomaly to report, reply normally.")
+	}
 	if !opts.WebSearch {
 		parts = append(parts, "Web search is disabled for this session. Do not call web_search or fetch_page tools; answer from existing knowledge and tell the user they can enable it with /search on if needed.")
 	} else {

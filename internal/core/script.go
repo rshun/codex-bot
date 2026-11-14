@@ -223,7 +223,7 @@ func (s *Service) runScriptTask(ctx context.Context, t store.Task) (string, bool
 
 func outputTail(output string, lines int) string {
 	output = strings.TrimRight(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
-	if strings.TrimSpace(output) == "" {
+	if isTaskSilentReply(output) {
 		return ""
 	}
 	parts := strings.Split(output, "\n")
@@ -275,5 +275,9 @@ func (s *Service) startScriptTrial(t store.Task) string {
 		text, _ := s.runScriptTask(ctx, t)
 		s.deliverTask(ctx, t, "", "", nil, text, nil)
 	}()
-	return fmt.Sprintf("▶️ 已在后台启动脚本任务 #%d：%s。\n脚本：%s\n执行完成后会推送结果（不占用当前会话）。", t.ID, t.Summary, t.Script)
+	targetNote := "执行完成后会推送结果（不占用当前会话）。"
+	if t.TargetPlatform != "" {
+		targetNote = fmt.Sprintf("执行完成后将仅推送至 %s（不占用当前会话）。", fullPlatformName(t.TargetPlatform))
+	}
+	return fmt.Sprintf("▶️ 已在后台启动脚本任务 #%d：%s。\n脚本：%s\n%s", t.ID, t.Summary, t.Script, targetNote)
 }

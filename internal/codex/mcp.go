@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,12 +16,20 @@ import (
 var (
 	reBearerSecret = regexp.MustCompile(`(?i)\b(Bearer\s+)([^\s"',;]+)`)
 	reTokenPrefix  = regexp.MustCompile(`\b(sk|xai|ghp|gho|github_pat|glpat|xoxb|xoxp)-[A-Za-z0-9_\-]{6,}`)
+	reBotURLToken  = regexp.MustCompile(`\b(bot\d+:)[A-Za-z0-9_\-]{10,}`)
 	reSecretKV     = regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie|credential)[A-Za-z0-9_]*)\s*([=:])\s*([^\s"',;\n]+)`)
+	reParenURL     = regexp.MustCompile(`(?i)\(\s*(?:https?:\s*)?https?://[^)\s]+\s*\)`)
+	reHTTPURL      = regexp.MustCompile(`https?://\S+`)
+	reMultiSpace   = regexp.MustCompile(`\s{2,}`)
 )
 
 // ReservedMCPName is the internal MCP server name managed by codex-bot for
 // interactive buttons and media tools; users cannot overwrite or remove it.
 const ReservedMCPName = "codexbot"
+
+func isReservedMCPName(name string) bool {
+	return strings.EqualFold(name, ReservedMCPName) || strings.EqualFold(name, "grokbot")
+}
 
 // RedactSensitive masks tokens, API keys, passwords, and auth headers in CLI outputs.
 func RedactSensitive(text string) string {
@@ -29,6 +38,7 @@ func RedactSensitive(text string) string {
 	}
 	out := reBearerSecret.ReplaceAllString(text, "${1}****")
 	out = reTokenPrefix.ReplaceAllString(out, "${1}-****")
+	out = reBotURLToken.ReplaceAllString(out, "${1}****")
 	out = reSecretKV.ReplaceAllStringFunc(out, func(m string) string {
 		sub := reSecretKV.FindStringSubmatch(m)
 		if len(sub) != 4 {
@@ -59,13 +69,190 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return firstLine(out), nil
 }
 
-// MCPList returns configured MCP servers (with sensitive fields redacted).
+// MCPList returns configured MCP server names without exposing URLs or launch arguments.
 func (c *Client) MCPList(ctx context.Context) (string, error) {
+	if out, err := c.runAdmin(ctx, 20*time.Second, "mcp", "list", "--json"); err == nil {
+		return FormatMCPList(out), nil
+	}
 	out, err := c.runAdmin(ctx, 20*time.Second, "mcp", "list")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(RedactSensitive(out)), nil
+	return FormatMCPList(out), nil
+}
+
+type mcpListEntry struct {
+	Name    string `json:"name"`
+	Enabled *bool  `json:"enabled"`
+	Status  string `json:"status"`
+}
+
+// FormatMCPList extracts MCP server names from `codex mcp list` JSON, table, or text output,
+// filtering reserved internal channels and stripping all URLs and command arguments.
+func FormatMCPList(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var entries []mcpListEntry
+		if err := json.Unmarshal([]byte(trimmed), &entries); err == nil {
+			return formatMCPEntries(entries)
+		}
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		var wrapped struct {
+			Servers []mcpListEntry `json:"servers"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &wrapped); err == nil && wrapped.Servers != nil {
+			return formatMCPEntries(wrapped.Servers)
+		}
+	}
+	lowerTrimmed := strings.ToLower(trimmed)
+	if strings.HasPrefix(lowerTrimmed, "no mcp servers") || strings.HasPrefix(lowerTrimmed, "no mcp server") {
+		return ""
+	}
+
+	var lines []string
+	inSpaceTable := false
+	for _, rawLine := range strings.Split(trimmed, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || isTableRuleLine(line) {
+			continue
+		}
+		if strings.HasSuffix(line, ":") {
+			inSpaceTable = false
+			continue
+		}
+		if strings.HasPrefix(line, "|") || strings.HasPrefix(line, "│") {
+			name, disabled, header := parsePipeTableRow(line)
+			if header || name == "" || isReservedMCPName(name) {
+				continue
+			}
+			lines = append(lines, formatMCPName(name, disabled))
+			continue
+		}
+		if cols := reMultiSpace.Split(line, -1); len(cols) >= 2 {
+			if isSpaceTableHeader(cols) {
+				inSpaceTable = true
+				continue
+			}
+			if inSpaceTable {
+				name := strings.TrimSpace(cols[0])
+				if name == "" || isReservedMCPName(name) {
+					continue
+				}
+				disabled := false
+				for _, col := range cols[1:] {
+					c := strings.Trim(strings.TrimSpace(col), "()")
+					if strings.EqualFold(c, "disabled") {
+						disabled = true
+						break
+					}
+				}
+				lines = append(lines, formatMCPName(name, disabled))
+				continue
+			}
+		}
+		if idx := strings.IndexByte(line, ':'); idx > 0 && !strings.ContainsAny(line[:idx], " \t(") {
+			name := strings.TrimSpace(line[:idx])
+			rest := strings.TrimSpace(line[idx+1:])
+			if name == "" || rest == "" || isReservedMCPName(name) {
+				continue
+			}
+			disabled := strings.HasSuffix(strings.ToLower(rest), "(disabled)") || strings.EqualFold(rest, "disabled")
+			lines = append(lines, formatMCPName(name, disabled))
+			continue
+		}
+		cleaned := reParenURL.ReplaceAllString(line, "")
+		cleaned = reHTTPURL.ReplaceAllString(cleaned, "")
+		fields := strings.Fields(cleaned)
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.TrimSpace(fields[0])
+		if name == "" || isReservedMCPName(name) {
+			continue
+		}
+		disabled := false
+		for _, tok := range fields[1:] {
+			if strings.EqualFold(strings.Trim(tok, "()"), "disabled") {
+				disabled = true
+				break
+			}
+		}
+		lines = append(lines, formatMCPName(name, disabled))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatMCPEntries(entries []mcpListEntry) string {
+	var lines []string
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name == "" || isReservedMCPName(name) {
+			continue
+		}
+		disabled := (e.Enabled != nil && !*e.Enabled) || strings.EqualFold(strings.TrimSpace(e.Status), "disabled")
+		lines = append(lines, formatMCPName(name, disabled))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatMCPName(name string, disabled bool) string {
+	if disabled {
+		return name + " (disabled)"
+	}
+	return name
+}
+
+func isTableRuleLine(line string) bool {
+	for _, r := range line {
+		switch r {
+		case '+', '-', '=', '_', '|', '│', '─', '━', '┼', '├', '┤', '┌', '┐', '└', '┘', '┬', '┴', ' ':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func parsePipeTableRow(line string) (name string, disabled bool, isHeader bool) {
+	normalized := strings.ReplaceAll(line, "│", "|")
+	rawCols := strings.Split(normalized, "|")
+	var cols []string
+	for _, c := range rawCols {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			cols = append(cols, c)
+		}
+	}
+	if len(cols) == 0 {
+		return "", false, false
+	}
+	if isSpaceTableHeader(cols) {
+		return "", false, true
+	}
+	for _, col := range cols[1:] {
+		if strings.EqualFold(strings.Trim(col, "()"), "disabled") {
+			disabled = true
+			break
+		}
+	}
+	return cols[0], disabled, false
+}
+
+func isSpaceTableHeader(cols []string) bool {
+	if len(cols) < 2 || !strings.EqualFold(strings.TrimSpace(cols[0]), "name") {
+		return false
+	}
+	for _, col := range cols[1:] {
+		switch strings.ToLower(strings.TrimSpace(col)) {
+		case "status", "url", "command", "args", "env", "cwd", "transport", "enabled", "auth", "working directory":
+			return true
+		}
+	}
+	return false
 }
 
 // MCPDoctor diagnoses MCP server configuration and handshake connectivity.
@@ -144,7 +331,7 @@ func checkMCPName(name string) error {
 	if strings.HasPrefix(name, "-") {
 		return errors.New("MCP 服务名称不能以 - 开头。")
 	}
-	if strings.EqualFold(name, ReservedMCPName) || strings.EqualFold(name, "grokbot") {
+	if isReservedMCPName(name) {
 		return errors.New("codexbot 是机器人内置通信通道，不能修改或删除。")
 	}
 	return nil

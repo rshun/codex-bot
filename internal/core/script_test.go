@@ -191,3 +191,36 @@ func TestScriptTaskSinglePlatformEnvAndFailureRouting(t *testing.T) {
 		t.Fatalf("expected 0 Discord failure alerts for TG-only script task, got %d", dcCount)
 	}
 }
+
+func TestScriptTaskNoReplyAndRunDueSilence(t *testing.T) {
+	if got := outputTail("  [[NO_REPLY]]\n", 10); got != "" {
+		t.Fatalf("expected outputTail to suppress [[NO_REPLY]], got %q", got)
+	}
+	if got := outputTail("`[[NO_REPLY]]`\r\n", 10); got != "" {
+		t.Fatalf("expected outputTail to suppress backtick-wrapped [[NO_REPLY]], got %q", got)
+	}
+
+	requirePython(t)
+	svc, _, sent := taskService(t, dailyNews)
+	dir := t.TempDir()
+	svc.ScriptDirs = []string{dir}
+	svc.ScriptLogDir = filepath.Join(t.TempDir(), "task-logs")
+	noReplyScript := writeScript(t, dir, "noreply.py", "print('[[NO_REPLY]]')\n")
+
+	rec := &recorder{}
+	say(svc, rec, "/task script 0 9 * * * "+noReplyScript+" 巡检脚本")
+	rec.wait(t, 1)
+
+	// Force NextRun due and trigger via runDue -> exit 0 with [[NO_REPLY]] stays silent.
+	if err := svc.Store.SetNextRun(context.Background(), 1, taskNow.Add(-10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	svc.runDue(context.Background())
+	time.Sleep(150 * time.Millisecond)
+	sent.mu.Lock()
+	pushed := len(sent.msgs)
+	sent.mu.Unlock()
+	if pushed != 0 {
+		t.Fatalf("expected 0 messages for exit-0 [[NO_REPLY]] script via runDue, got %#v", sent.msgs)
+	}
+}

@@ -148,6 +148,11 @@ func TestSystemPromptForFeatures(t *testing.T) {
 			t.Fatalf("expected %q in system prompt, got:\n%s", want, sp)
 		}
 	}
+
+	schedSP := systemPromptFor(ReplyOptions{ScheduledTask: true})
+	if !strings.Contains(schedSP, "[[NO_REPLY]]") || !strings.Contains(schedSP, "automated scheduled task") {
+		t.Fatalf("expected scheduled task [[NO_REPLY]] rule in system prompt, got:\n%s", schedSP)
+	}
 }
 
 func TestResetLeader(t *testing.T) {
