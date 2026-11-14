@@ -101,6 +101,10 @@ func TestCommandTextSubcommands(t *testing.T) {
 		{sub("task", "platform", &discordgo.ApplicationCommandInteractionDataOption{Name: "id", Type: discordgo.ApplicationCommandOptionInteger, Value: float64(2)}, str("target", "tg")), "/task platform 2 tg"},
 		{sub("task", "list"), "/task list"},
 		{sub("task", "del", &discordgo.ApplicationCommandInteractionDataOption{Name: "id", Type: discordgo.ApplicationCommandOptionInteger, Value: float64(3)}), "/task del 3"},
+		{sub("upgrade", "check"), "/upgrade check"},
+		{sub("upgrade", "run"), "/upgrade run all"},
+		{sub("upgrade", "run", str("target", "cli")), "/upgrade run cli"},
+		{sub("upgrade", "auto", str("mode", "on")), "/upgrade auto on"},
 	}
 	for _, tc := range cases {
 		if got := commandText(tc.data); got != tc.want {

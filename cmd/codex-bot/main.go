@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/rshun/codex-bot/internal/actions"
 	"github.com/rshun/codex-bot/internal/codex"
@@ -22,11 +24,13 @@ import (
 	"github.com/rshun/codex-bot/internal/sandbox"
 	"github.com/rshun/codex-bot/internal/schedule"
 	"github.com/rshun/codex-bot/internal/store"
+	"github.com/rshun/codex-bot/internal/updater"
 )
 
 var version = "dev"
 
 func main() {
+	initialEnv := os.Environ()
 	inv, err := parseCLI(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error()+"\n\n"+cliUsage)
@@ -205,6 +209,12 @@ func main() {
 	if schedInitErr != nil && !isTaskRun {
 		slog.Warn("os scheduler unavailable", "err", schedInitErr)
 	}
+	upgrader := &updater.Manager{
+		Repo:          cfg.UpgradeRepo,
+		CurrentBotVer: cfg.Version,
+		CodexBin:      cfg.CodexBin,
+		NPMBin:        cfg.NPMBin,
+	}
 	svc := &core.Service{
 		Actions:             actionsForSvc,
 		Store:               db,
@@ -230,6 +240,9 @@ func main() {
 		ScriptEnv:           scriptTaskEnv(dataDir, activeEnvFile),
 		Scheduler:           schedBackend,
 		SchedulerInitErr:    schedInitErr,
+		Updater:             upgrader,
+		AutoUpgrade:         cfg.AutoUpgrade,
+		AutoUpgradeTime:     cfg.AutoUpgradeTime,
 	}
 	type runner struct {
 		name string
@@ -268,6 +281,19 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	var (
+		restartOnce   sync.Once
+		restartTarget string
+	)
+	svc.RequestRestart = func(exePath string) {
+		restartOnce.Do(func() {
+			restartTarget = exePath
+			slog.Info("restarting into upgraded binary", "exe", exePath)
+			stop()
+		})
+	}
+
 	if actionsForSvc != nil {
 		go func() {
 			if err := actionsForSvc.Serve(ctx); err != nil {
@@ -283,6 +309,15 @@ func main() {
 		return
 	}
 	svc.InitScheduler(ctx)
+	svc.StartAutoUpgrader(ctx)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+			svc.SendPendingUpgradeNotice(ctx)
+		}
+	}()
 	slog.Info("listening", logArgs...)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {
@@ -302,6 +337,24 @@ func main() {
 		if err := <-errCh; err != nil {
 			failed = true
 		}
+	}
+	if restartTarget != "" {
+		// Explicitly close sockets and SQLite WAL handles before syscall.Exec replaces the process image.
+		if actionsForSvc != nil {
+			_ = actionsForSvc.Close()
+		}
+		_ = db.Close()
+		if taskLogFile != nil {
+			_ = taskLogFile.Close()
+		}
+		if err := updater.ExecSelf(restartTarget, os.Args, initialEnv); err != nil {
+			slog.Error("exec upgraded binary failed; rolling back", "err", err)
+			if rbErr := updater.RollbackBotBinary(restartTarget); rbErr != nil {
+				slog.Error("rollback binary failed", "err", rbErr)
+			}
+			os.Exit(1)
+		}
+		return
 	}
 	if failed {
 		os.Exit(1)

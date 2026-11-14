@@ -130,6 +130,7 @@ func (b *Bot) registerCommands() error {
 		tgbotapi.BotCommand{Command: "quota", Description: "查看账号窗口剩余额度"},
 		tgbotapi.BotCommand{Command: "dir", Description: "查看或管理可写目录"},
 		tgbotapi.BotCommand{Command: "shell", Description: "查看或开关命令执行权限"},
+		tgbotapi.BotCommand{Command: "upgrade", Description: "检查或升级 codex-bot 与 Codex CLI"},
 		tgbotapi.BotCommand{Command: "reset", Description: "清空当前会话上下文（保留长期记忆）"},
 		tgbotapi.BotCommand{Command: "help", Description: "查看使用说明"},
 	)

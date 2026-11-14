@@ -307,6 +307,48 @@ func (b *Bot) registerCommands() error {
 				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "clear", Description: "清空所有长期记忆"},
 			},
 		},
+		{
+			Name:        "upgrade",
+			Description: "检查或一键升级 codex-bot 与 Codex CLI",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "check", Description: "检查 codex-bot 与 Codex CLI 新版本"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "run",
+					Description: "立即执行升级",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "target",
+							Description: "升级目标（默认全部）",
+							Required:    false,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "全部（Codex CLI + codex-bot）", Value: "all"},
+								{Name: "仅 codex-bot", Value: "bot"},
+								{Name: "仅 Codex CLI", Value: "cli"},
+							},
+						},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "auto",
+					Description: "查看或开关每日定时自动升级",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "mode",
+							Description: "开启或关闭",
+							Required:    false,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "开启", Value: "on"},
+								{Name: "关闭", Value: "off"},
+							},
+						},
+					},
+				},
+			},
+		},
 	})
 	return err
 }
@@ -500,7 +542,7 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/new"
-	case "dir", "task", "memory", "sessions", "mcp":
+	case "dir", "task", "memory", "sessions", "mcp", "upgrade":
 		return subcommandText(data)
 	default:
 		if data.Name == "" {
@@ -561,6 +603,18 @@ func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 		return base + " list"
 	case data.Name == "memory" && sub.Name == "clear":
 		return base + " clear"
+	case data.Name == "upgrade" && sub.Name == "check":
+		return base + " check"
+	case data.Name == "upgrade" && sub.Name == "run":
+		if values["target"] != "" {
+			return base + " run " + values["target"]
+		}
+		return base + " run all"
+	case data.Name == "upgrade" && sub.Name == "auto":
+		if values["mode"] != "" {
+			return base + " auto " + values["mode"]
+		}
+		return base + " auto"
 	default:
 		return base
 	}

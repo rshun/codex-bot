@@ -20,6 +20,7 @@ import (
 	"github.com/rshun/codex-bot/internal/sandbox"
 	"github.com/rshun/codex-bot/internal/schedule"
 	"github.com/rshun/codex-bot/internal/store"
+	"github.com/rshun/codex-bot/internal/updater"
 )
 
 // emptyReplyText is shown when a turn finishes without any answer text.
@@ -88,13 +89,23 @@ type Service struct {
 	ProgressInterval time.Duration
 	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.
 	ImageLoadTimeout time.Duration
+	// Updater manages version checks and in-place upgrades for codex-bot and Codex CLI.
+	Updater *updater.Manager
+	// AutoUpgrade is the default startup setting for daily background upgrades (overridable via /upgrade auto).
+	AutoUpgrade bool
+	// AutoUpgradeTime is the daily HH:MM check time in Location (defaults to "04:30").
+	AutoUpgradeTime string
+	// RequestRestart signals the host daemon to gracefully close resources and exec the new binary.
+	RequestRestart func(exePath string)
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
-	mu           sync.Mutex
-	lanes        map[string]*lane
-	dmChannels   map[string]string
-	lastSchedErr error
+	mu                sync.Mutex
+	upgradeMu         sync.Mutex
+	lanes             map[string]*lane
+	dmChannels        map[string]string
+	lastSchedErr      error
+	pendingRestartExe string
 }
 
 type lane struct {
@@ -313,7 +324,10 @@ func (s *Service) dispatch(it item) {
 		reply, quiet, files, buttons = codex.UserFacing(err), false, nil, nil
 	}
 	// The answer is shown first; the files follow it, each quoting the user's message.
-	defer func() { s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files) }()
+	defer func() {
+		s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files)
+		s.triggerPendingRestart()
+	}()
 	if strings.TrimSpace(reply) == "" {
 		if quiet {
 			// The turn only reacted: the reaction is the answer, so the progress message goes away.
@@ -467,6 +481,12 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, out platform
 		return text, nil, btns, err
 	case "/task":
 		return s.taskCommand(ctx, in, out, arg, onTool)
+	case "/upgrade":
+		text, btns, restartExe, err := s.upgradeCommand(ctx, in, arg)
+		if restartExe != "" {
+			s.setPendingRestart(restartExe)
+		}
+		return text, nil, btns, err
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
 			return "", nil, nil, err
@@ -825,6 +845,8 @@ func helpText(version string) string {
     暂停或恢复指定定时任务
 /task del 编号
     删除定时任务
+/upgrade
+    检查或一键升级 codex-bot 与 Codex CLI（支持 /upgrade run、/upgrade auto on|off）
 /reset
     清空这个聊天的上下文（长期记忆会保留）
 /help
@@ -833,6 +855,22 @@ func helpText(version string) string {
 		text += "\n\n版本：" + version
 	}
 	return text
+}
+
+func (s *Service) setPendingRestart(exePath string) {
+	s.mu.Lock()
+	s.pendingRestartExe = exePath
+	s.mu.Unlock()
+}
+
+func (s *Service) triggerPendingRestart() {
+	s.mu.Lock()
+	exe := s.pendingRestartExe
+	s.pendingRestartExe = ""
+	s.mu.Unlock()
+	if exe != "" && s.RequestRestart != nil {
+		s.RequestRestart(exe)
+	}
 }
 
 func formatModels(current string, list codex.ModelList) string {

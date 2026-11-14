@@ -84,6 +84,7 @@ const runLayout = "2006-01-02T15:04:05Z"
 // Store persists chat state in a local SQLite file.
 type Store struct {
 	db           *sql.DB
+	dataDir      string
 	defaultModel string
 }
 
@@ -97,7 +98,7 @@ func Open(dataDir, defaultModel string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, defaultModel: defaultModel}
+	s := &Store{db: db, dataDir: filepath.Clean(dataDir), defaultModel: defaultModel}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -489,6 +490,45 @@ func (s *Store) PutSetting(ctx context.Context, key, value string) error {
 		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		key, value)
 	return err
+}
+
+// BackupBeforeUpgrade creates a transactionally consistent snapshot of bot.db inside `<dataDir>/backups/`
+// keyed by versionTag (e.g. `bot.db.pre-v2.1.1`). If the snapshot already exists and is non-empty, it is reused.
+func (s *Store) BackupBeforeUpgrade(ctx context.Context, versionTag string) (string, error) {
+	if s.dataDir == "" {
+		return "", fmt.Errorf("store data directory is empty")
+	}
+	backupDir := filepath.Join(s.dataDir, "backups")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup directory: %w", err)
+	}
+	safeTag := sanitizeVersionTag(versionTag)
+	dst := filepath.Join(backupDir, "bot.db.pre-"+safeTag)
+	if abs, err := filepath.Abs(dst); err == nil {
+		dst = abs
+	}
+	if info, err := os.Stat(dst); err == nil && !info.IsDir() && info.Size() > 0 {
+		return dst, nil
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		return "", fmt.Errorf("sqlite vacuum backup: %w", err)
+	}
+	_ = os.Chmod(dst, 0o600)
+	return dst, nil
+}
+
+func sanitizeVersionTag(raw string) string {
+	raw = strings.TrimSpace(raw)
+	var b strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 // AddMemory stores a persistent memory for one chat if not already present, returning its ID and whether it was newly added.
